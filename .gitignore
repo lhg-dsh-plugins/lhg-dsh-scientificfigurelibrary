@@ -1,0 +1,17 @@
+node_modules/
+dist/
+release/
+.agents/
+.codex/
+.DS_Store
+*.log
+
+__pycache__/
+*.py[cod]
+.playwright-mcp/
+
+.runtime-cache/
+desktop/macos/.build/
+
+# Local validation artifacts
+test-results/

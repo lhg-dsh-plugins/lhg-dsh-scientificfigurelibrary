@@ -1,0 +1,1306 @@
+# Scientific Figure Library protocol
+
+## 0.9.1 network and MCP update status
+
+The local Settings page saves one machine/user `network-access.json`. An already-running
+stdio MCP process reloads it before each HTTPS operation; one operation retains its
+proxy choice through redirects. Supported proxies remain opt-in, loopback HTTP CONNECT
+only (`127.0.0.1`, `localhost`, or `::1`). A saved address takes precedence over a
+valid environment address and supported system detection. An enabled but invalid,
+missing, or unreachable proxy fails the operation; it does not switch to direct access.
+The page and MCP tools distinguish configuration from a reachable local port and a
+successful request to the fixed GitHub release endpoint. The configuration is shared
+only by processes running as the same user on the same machine; remote and container
+MCP servers have their own configuration. Saves use an atomic file replacement and
+`revision` conflict check. A stale page must reload before retrying a save.
+
+`figure_library_network_status` returns the current configuration and revision;
+`figure_library_network_test` runs a bounded request only to SFL's GitHub releases
+endpoint. Neither accepts a URL. The local HTTP API exposes the same operations at
+`GET /api/network-access` and `POST /api/network-access/test` after session
+authentication. The save endpoint accepts the returned `revision`.
+
+All three MCP diagnostic tools use the standard terminal outcome envelope below.
+Status fields are exposed alongside `structuredContent.envelope`, and the first text
+item includes the terminal fields followed by the status data. Operational failures
+retain that envelope and set `isError: true`; failed diagnostics never consume or
+append an update notice. Inspect `code` once rather than repeating an identical call:
+
+- `network_status` / `network_configuration_invalid` / `network_status_failed`;
+- `network_test_passed` / `network_test_failed`;
+- `update_status` / `update_check_failed` / `update_status_failed`.
+
+The connectivity probe keeps its inspected proxy through the TCP probe and HTTPS
+request. After the optional 1.5-second local-port probe, its 8-second request deadline
+covers CONNECT, TLS, HTTPS headers and the proxied response body. Cancellation closes
+the active sockets in every phase. Other proxy fetches have a 60-second whole-request
+deadline shared across automatic redirects. Gitee's explicit archive redirect shares
+the initial download's proxy snapshot (including direct access) and deadline; changes
+to settings take effect only on the next download operation.
+
+The stdio MCP adapter reads a shared stable GitHub Release cache on startup and may
+append one extra **text content item** to the first successful tool result in a
+session when a fresh cache proves a newer version. It leaves structured content,
+receipts, plans, operation IDs, and authoritative stored results unchanged. Cold or
+stale caches refresh in the background with a bounded timeout; initialization and
+ordinary tool results never wait for GitHub. Successful remote checks expire after
+24 hours and failed checks cool down for one hour. A failed check means unknown,
+not current. The notice includes the running version, latest stable version, verified
+version-specific Release link, and restart guidance. Hosts may choose how to display
+tool text; no popup, automatic install, or stdout log is implied.
+
+`figure_library_update_status` reports the current/latest versions, check time,
+freshness, and Release link. Pass `{ "refresh": true }` for an explicit bounded
+check, including when unsolicited notices are disabled. Set
+`SFL_MCP_UPDATE_NOTICES=0` in the MCP process environment to disable background
+checks and unsolicited notices. The local Web client retains its own update banner.
+If a remote check succeeds but saving its cache fails, the fresh result remains
+available in memory with `cachePersisted: false` and `cachePersistenceError`. This is
+not a failed remote check. Reading status does not discard that result or trigger an
+automatic retry; after restart, a process without the persisted cache may check again.
+
+> Landing page and install: [README.md](../README.md). This file is the full tool contract, safety rules, and Library layout.
+
+
+Scientific Figure Library (SFL) is a standard stdio MCP server with an optional MCP App for
+building, reviewing, finding, and materializing reusable scientific-figure
+references. Version 0.6 keeps one **user-selected global Library** as the durable,
+cross-project source of truth. Wisp, Codex, Claude, Cursor, Pi, dsh, and other MCP hosts can use
+the same Library without copying it into every project.
+
+The 0.6 standard core uses one Provider registry. Its built-in retrieval
+providers are:
+
+- **Local Published** (`org.scientificfigurelibrary.local`) — immutable,
+  locally reviewed Releases from the global Library.
+- **FigureYa** (`org.figureya.module`) — the bundled 319-module search catalog,
+  with commit-pinned source/archive identities.
+- **Open Figure Modules** (`io.github.jarxunlai.personal-figures`) — a
+  `module-catalog` Provider whose bundled snapshot is only the offline
+  bootstrap. While the MCP process is running, SFL asynchronously checks the
+  signed `open-figure-feed` manifest, verifies Ed25519/bytes/ZIP/tombstones,
+  and atomically activates a remote last-known-good overlay. Search keeps the
+  same Provider ID, `module-archive.v1` selectors, and default order. Complete
+  ZIPs never enter the plugin and are still fetched only for one exact
+  selected materialization. 0.6.4 and earlier builds do not contain this
+  updater.
+- **SFL Community** (`io.github.jarxunlai.scientific-figure-community`) — a
+  centrally curated Catalog and preview snapshot bundled with this SFL build.
+  Complete template archives stay outside the plugin and are downloaded only
+  during an explicitly network-enabled materialization. In 0.6.1 this Provider
+  is frozen and excluded from default search, but explicit `providerId` access
+  remains available for compatibility.
+
+Users may also add an independently keyed, Ed25519-signed HTTPS Provider.
+Personal Providers are excluded from default search until the user explicitly
+enables `includeInDefaultSearch`. `figure_library_search` queries the dynamic
+default Provider set. Results are provider-qualified and carry an
+`exactSelector`; a bare `templateId` is never enough to describe, preview, or
+materialize an exact result.
+
+> **Open Figure Modules overlay:** bundled Catalog is bootstrap, not the
+> latest directory. Ordinary search uses stale-while-revalidate and never
+> blocks on GitHub. Provider source tools list this channel as
+> `official-signed-overlay`. `configure` may set `autoRefresh`; `update`
+> immediately checks the signed feed. `remove` only disables ordinary search
+> via a local preference and can be restored; add/trust-reset remain rejected.
+> Withdrawn moduleIds are cumulative tombstones: they cannot be searched,
+> described, previewed, or newly materialized, but already materialized
+> projects are not deleted.
+>
+> **0.6.1 personal module boundary:** default search order is Local Published,
+> FigureYa, Open Figure Modules, then dynamic personal Providers that opted
+> in. Community remains registered with `enabled: true`,
+> `includeInDefaultSearch: false`, and `frozen: true`. Personal selectors use
+> `kind=module-archive.v1` and bind source/archive commits, ZIP size/SHA-256,
+> primary preview identity, Catalog SHA-256, and `template` or `full` mode.
+
+> **0.6.0 Provider and publication boundary:** bundled Community compatibility
+> remains frozen and explicit-only in 0.6.1; its search and
+> preview are offline. Public materialization verifies a commit-pinned archive
+> and writes `template-lock.v3` with `codeExecutedBySflClient: false`. An exact
+> Local Published Release can be exported only as a sanitized, explicitly
+> licensed submission. Export does not publish, sign, execute code, or create a
+> pull request.
+
+> **0.5.1 protocol migration (still required in 0.6.0):** `figure_library_plan_materialize`
+> requires a session-local, single-use `previewReceipt` produced only
+> after an exact preview and explicit confirmation. There is no receipt-free
+> compatibility path.
+>
+> **0.5.2 review truthfulness:** Working preview now has its own exact read-only
+> selector; Working and Published Reviews are reported separately; Published
+> warnings remain bound to their immutable Release; canonical preview choices
+> and the three-part validation state are exposed consistently across review,
+> planning, search, and details.
+>
+> **0.5.5 host plugins and display modes:** the same Skill and MCP server are packaged for Wisp, Codex, Claude, and Cursor. Pi and DeepSeek Harness (dsh) install that same npm package (`pi install` / `dsh plugin add`). The MCP App may request `fullscreen` or `pip` when the Host advertises those modes; there is no docked-sidebar display mode.
+>
+> **0.5.4 scientificQuestion:** optional retrieval field for the biological question a figure answers. It is not `description` or `visualProfile`. In that release, ordinary search returned only Local Published heads; 0.6.0 keeps the field while expanding the Provider set.
+
+> **0.5.3 transport image adapter:** MCP image payloads are adapted to the
+> existing search and preview Data URL budgets before they leave the server.
+> Canonical Preview bytes, Revision Content Digests, and `previewSha256` remain
+> unchanged; derived transport images live only under rebuildable `indexes/`.
+
+The host Agent, not this server, inspects an uploaded figure and code, reasons
+about their relationship, and asks the user to confirm the Figure Unit. SFL
+then verifies bytes, records hashes and provenance, creates immutable
+Revisions, enforces review gates, and publishes Releases. The server contains
+no second model and does not execute plotting code.
+
+## 0.6 design boundaries
+
+- The Library is global and cross-project. A project receives a
+  `template.lock.json` when a template is materialized; there are no project
+  pins and no project-scoped Library.
+- Direct user-supplied image/code intake is the standard path.
+- Web Capture and `figure_capture_*` tools are not registered in the standard
+  0.6 core. The experimental 0.4.2 Capture work remains isolated from the
+  standard design.
+- Legacy flat `figure-library.template.v1` entries are migration input only.
+  They do not appear in ordinary search until explicitly adopted.
+- Working Revisions are visible only through review tools. Ordinary
+  search/describe/preview/materialize operate on Published Releases or exact
+  public/FigureYa selectors.
+- CiteBox is an explicit intake adapter, not a search provider. SFL never reads
+  or writes CiteBox SQLite directly.
+
+## Safety and truthfulness contract
+
+The private local client cache API (`reference-cache/status`, `reference-cache/ensure`)
+reports and fills only two local caches: preview images and source-pack archives.
+A selected candidate must belong to a live result set. Status reads do not download
+missing previews or archives. `ensure` downloads the pinned source-pack ZIP into the
+bound Library `source-packs/` directory when needed, then reads the pack's extracted
+template cache; it does not write a third copy under `indexes/reference-cache/` and
+does not replace exact-preview confirmation for project materialization. Local
+Published copy prompts point at the Library store. These authenticated private HTTP
+operations do not change the public MCP tool schema.
+
+SFL treats every supplied or downloaded asset as untrusted reference material.
+It copies and hashes files but never runs plotting code, notebooks, shell
+scripts, or dependency installers.
+
+Validation state has three independent parts. `plotExecution` records only the
+plot run, `upstreamWorkflow` records the upstream analysis workflow, and
+`scientificValidation` records a user or external-review assessment. Plot
+execution never implies either of the other two:
+
+- `plotExecution.status: not_run`: SFL has no plot-execution evidence.
+- `plotExecution.status: failed`: a plot execution attempt is recorded as
+  failed.
+- `plotExecution.status: passed`: requires a `rendered_output`, a
+  `generated_output` figure-code relationship, and an evidence asset.
+- `upstreamWorkflow.status: partial|passed|failed`: requires a non-empty scope
+  and evidence; otherwise use `unknown`, `not_run`, or `not_applicable`.
+- `scientificValidation.status: limited|validated|rejected`: requires a
+  `decisionSource` (`user` or `external_review`) and a referenced assessment
+  asset; otherwise use `not_assessed` or `not_applicable`.
+
+The legacy `executionStatus` field remains a compatibility projection of
+`plotExecution.status`. A legacy `passed` Release reads as plot passed with
+unknown scope, upstream unknown, and scientific not assessed; it is never
+promoted to full workflow reproduction or scientific validation.
+
+Visual-reference provenance (`visual_inference`), code maturity, and plot execution are independent. Agent-generated or adapted code may have recorded execution. A passed execution still requires rendered output, generated-output links and stored evidence. Source-reference images need not be paired with code outputs.
+
+All public operations return a terminal outcome envelope:
+
+```text
+OUTCOME: <ok|needs_user_input|needs_user_confirmation|applied|...>
+TERMINAL: true
+RETRY_SAME_CALL: false
+CODE: <stable code>
+NEXT_ACTION: <none|ask_user|apply_confirmed_plan|create_new_plan|...>
+```
+
+An Agent must inspect `OUTCOME`, `CODE`, and `NEXT_ACTION` once. It must not
+repeat an identical failed or blocked tool call. If a plan is stale or absent,
+create a new plan; if user input is missing, ask the user; otherwise stop and
+report the exact failure.
+
+`figure_library_open` and the paginated candidate gallery are MCP App entry
+points. A Host may reject App display before the server runs with MCP `-32601`
+or `Capability is not granted`. That is a Host UI-capability result, not
+permission to retry. Ordinary headless tools can still be used. A real
+App-local exact-preview acceptance requires Host `serverTools`. When
+`serverTools` is absent but
+`updateModelContext.text` is available, the sidebar may let the user select one
+current-page candidate and hand it to the Agent for a single headless exact
+review. That fallback must not be reported as an exact image loaded in the App.
+If both capabilities are absent, the sidebar displays a capability error. A
+backend `view_image` check is never evidence that the user's sidebar displayed
+the image.
+
+## Requirements and build
+
+Node.js 22 or newer is required.
+
+```bash
+npm install
+npm run check
+```
+
+Run the compiled server from any stdio MCP host:
+
+```json
+{
+  "mcpServers": {
+    "figure-library": {
+      "command": "node",
+      "args": ["/absolute/path/to/ScientificFigureLibrary/dist/index.js"],
+      "env": {
+        "FIGUREYA_SOURCE_PACK_DIR": "/optional/path/to/FigureYaSourcePack"
+      }
+    }
+  }
+}
+```
+
+The preferred global binding is the user locator described below. An optional
+`FIGURE_LIBRARY_DIR` environment variable is an administrative override; when
+present, it takes precedence over the locator.
+
+## One global, portable Library
+
+The user chooses the Library directory. SFL does not silently use the current
+project. Bind it with a read-only plan followed by explicit Apply:
+
+1. Call `figure_library_plan_bind_global` with an absolute
+   `libraryDirectory`.
+2. Show the user the exact path, `libraryId`, inventories, migration mode, and
+   `planDigest`.
+3. After confirmation, call `figure_library_apply_bind_global` with the
+   visible `planDigest` and a stable `operationId` in the same server session.
+   Apply accepts only a server-issued cached digest; client-authored opaque
+   plans are deliberately rejected as an authority boundary.
+4. Start a new host session if the host caches MCP state.
+
+The locator is deliberately small and machine-local:
+
+- Windows: `%APPDATA%\ScientificFigureLibrary\locator.json`
+- Linux/WSL: `$XDG_CONFIG_HOME/scientific-figure-library/locator.json`, or
+  `~/.config/scientific-figure-library/locator.json`
+
+The locator records the absolute directory, `libraryId`, and configuration
+revision. The portable Library itself contains relative POSIX paths and this
+authoritative layout:
+
+```text
+<library-root>/
+├── library.json
+├── store/
+│   ├── templates/<templateId>/
+│   │   ├── series.json
+│   │   ├── revisions/<revisionId>/
+│   │   │   ├── content.json
+│   │   │   └── assets/...
+│   │   ├── reviews/<reviewId>.json
+│   │   └── releases/<releaseId>.json
+│   ├── operations/
+│   │   ├── intents/
+│   │   └── receipts/public-materializations/<providerId>/<operationId>.json
+│   ├── imports/<adapterId>/<importId>/receipts/<receiptId>/
+│   ├── migrations/flat-v1/
+│   ├── exports/
+│   └── quarantine/
+├── indexes/                 # derived and rebuildable
+└── locks/                   # runtime only
+```
+
+`library.json` plus `store/` are authoritative and should be backed up.
+`indexes/` can be rebuilt. `locks/` must not be migrated or copied as Library
+content. The root marker is `figure-library.root.v1`, storage layout
+`figure-library.store-layout.v1`, with SHA-256 and RFC 8785 canonical JSON.
+
+If neither a locator nor `FIGURE_LIBRARY_DIR` exists, legacy
+`~/.figure-library` may be inspected read-only. Writes fail closed until the
+user explicitly binds a global Library. `figure_library_source_status` and
+`figure_library_open` report `CODE: setup_required` when the global Library
+or Local workspace is unbound. The App empty state and Skill then ask for the
+missing absolute directories instead of a plotting query. `figure_library_source_status`
+also reports the effective root, source, locator, `libraryId`, write state,
+counts, lock state, and FigureYa source-pack state.
+
+## Direct image/code intake
+
+One Working Revision represents one user-confirmed **Figure Unit**. Before
+planning, the Agent must inspect the actual files and collect or confirm:
+
+1. create, update, or reuse an exact existing template;
+2. title and Figure Unit boundary;
+3. every visual asset and whether it is a `source_reference` or
+   `rendered_output`; every user-uploaded original figure must be included in
+   `visualAssets` as `source_reference`;
+4. multi-image grouping when more than one visual belongs to the Figure Unit;
+5. the canonical primary preview and, when required, the user's override;
+6. `plot_template` or `visual_reference`;
+7. for a plot template, all code assets, their origins, the canonical
+   implementation, and evidence-backed many-to-many figure-code links;
+8. the truthful three-part validation state;
+9. duplicate decision: `create_new`, `update_exact`, or `reuse_existing`;
+10. provenance, license, and any review findings.
+
+Supported figure-code relationships are:
+
+- `user_supplied_pair`
+- `author_provided_original`
+- `visual_inference`
+- `adapted_from_template`
+- `generated_output`
+
+Code origins are `user_supplied`, `author_provided`, `agent_generated`, or
+`adapted`. R, Python, Julia, MATLAB, and other languages are accepted as
+metadata; SFL does not privilege or execute a language. A `plot_template`
+requires code and a user-selected canonical implementation. If reliable code
+is absent, use `visual_reference` rather than pretending that a reproducible
+template exists.
+
+Canonical preview selection is deterministic:
+
+- exactly one `source_reference` is the default
+  (`default_uploaded_source`), even when rendered outputs also exist;
+- one total visual is the only available choice (`only_visual_available`);
+- an explicit source selection is recorded as `user_selected_source`;
+- multiple sources, or multiple rendered-only visuals without a selection,
+  return `canonical_preview_ambiguous`;
+- choosing a rendered output while a source exists requires
+  `primaryPreviewOverride: { confirmedBy: "user", reason }` and is recorded as
+  `user_override_rendered`; without it the plan returns
+  `canonical_preview_override_required`.
+
+This 0.5.3 boundary is intentionally Host-governed: the Host must include the
+uploaded original in `visualAssets` as `source_reference`. The Server verifies
+declared assets but does not receive a separate upload manifest, so it cannot
+detect that a Host omitted an original entirely. No digest-declaration hard
+check is added in this release.
+
+Call `figure_library_plan_working_revision` first. It verifies regular,
+non-symlink host files and produces a complete immutable candidate and review
+snapshot without writing. Absolute source paths are input-only and are not
+persisted in the public Revision. Show the returned action, IDs, digests, asset
+hashes, `reviewSummary`, canonical decision, validation state, and the exact
+Working preview selector. Call `figure_library_preview_working_revision` with
+that unchanged `templateId`, `revisionId`, and `contentDigest` to inspect the
+canonical image before Apply. The selector resolves only the latest exact,
+session-local pending Working plan for that Series; after Apply it resolves the
+matching current Working Head. A newer plan makes the prior pending selector
+stale, and publication removes the Working target. This tool is read-only: it
+accepts no destination, creates no preview receipt, and never authorizes
+materialization. Show validation errors, gates, and warnings. Only after the
+user confirms that exact plan call `figure_library_apply_working_revision`
+with:
+
+- `planDigest`
+- stable `operationId`
+- `expectedAction`
+- `expectedTemplateId`
+- `expectedSeriesDigest`
+
+Apply rechecks source bytes and series state. Operation IDs are idempotent;
+stale plans are rejected rather than silently adapted.
+
+## Immutable review and publication
+
+The canonical schemas are:
+
+- `figure-library.template-series.v1`
+- `figure-library.template-content.v1`
+- `figure-library.review-snapshot.v1`
+- `figure-library.template-release.v1`
+
+A `templateId` identifies a stable Series. A Content Revision and Release are
+immutable. A Series has at most one Working Head and one Published Head. Every
+Working save creates a full new Revision; history is never edited in place.
+
+Validation findings are intentionally separate:
+
+- **Validation Error** — structurally or semantically invalid content; blocks
+  publication.
+- **Blocking Review Gate** — an explicit review decision is required; blocks
+  publication while open.
+- **Review Warning** — visible but not itself blocking.
+
+There is no waiver path in 0.6.0. Review with
+`figure_library_review_open`, `figure_library_template_history`, and
+`figure_library_diff_revisions`. Lifecycle changes use separate plan/apply
+pairs:
+
+- `figure_library_plan_review_gate_update` /
+  `figure_library_apply_review_gate_update`
+- `figure_library_plan_publish_working_revision` /
+  `figure_library_apply_publish_working_revision`
+- `figure_library_plan_discard_working_revision` /
+  `figure_library_apply_discard_working_revision`
+- `figure_library_plan_restore_release` /
+  `figure_library_apply_restore_release`
+- `figure_library_plan_adopt_versioning` /
+  `figure_library_apply_adopt_versioning`
+
+Publishing atomically creates the immutable Release and switches the Published
+pointer. The old Published Release remains usable until that switch. Restoring
+history creates a new Working candidate and requires review; it never rewinds
+the Published pointer directly. Adopting a flat-v1 template is explicit and
+non-destructive, with a migration receipt.
+
+`figure_library_review_open` returns `workingReview` and `publishedReview`
+separately when both exist; compatibility field `review` resolves to
+`workingReview ?? publishedReview`. Published review findings come from the
+Review Snapshot bound by the Release and therefore remain visible after the
+Working Head is cleared or replaced. Working and publish plan/apply responses
+use one `reviewSummary` shape containing validation errors, open gates,
+warnings, `publishEligible`, canonical preview decision, and validation state.
+
+## Unified search and exact selectors
+
+`figure_library_search` searches the complete relevance-matched dynamic
+Provider set unless `providerIds` explicitly narrows it. The default order is
+Local Published, FigureYa, bundled Open Figure Modules, then enabled
+dynamic personal Providers whose `includeInDefaultSearch` flag was explicitly
+set, ordered canonically by `providerId`. Community is explicit-only and does
+not enter this list. Working Revisions, Capture records, and unadopted flat entries
+are excluded. The retrieval score is unchanged: it only orders candidates and
+is not visual similarity, confidence, or approval. A broken personal Provider
+is reported as degraded/corrupt while healthy default Providers continue; an
+explicit request for only the broken Provider fails terminally.
+
+The first page defaults to 6 candidates (`limit` maximum 12). Responses expose
+`resultSetId`, true `total`, `pageIndex`, `hasMore`, and opaque `nextCursor` as
+well as the structured `pagination` object. The cursor is bound to the query,
+filters, page size, Library root, Local Published revision, and FigureYa
+catalog revision. Catalog or Library changes return `search_results_stale`
+instead of silently drifting. Each page carries verified PNG/JPEG/WebP
+thumbnails. Search uses a 256 KiB per-image and 3 MiB per-page Data URL
+ceiling; exact, Working, and compatibility preview use a 1 MiB single-image
+Data URL ceiling. Oversized canonical assets are scaled or JPEG-compressed
+only for transport. The
+model-visible `structuredContent` contains only compact candidate summaries;
+thumbnail Data URLs are keyed by result-scoped `candidateId` under result
+`_meta.candidatePreviews`, which MCP Apps expose only to the component.
+
+Each candidate includes `providerId` and `exactSelector`:
+
+- Local Published identity: `templateId`, `revisionId`, `contentDigest`, and
+  `releaseId`.
+- FigureYa identity: `moduleId`, source commit, archive commit, archive
+  integrity identity, and materialization mode when an archive exists.
+- Personal module identity: `providerId`, `moduleId`, one repository's source
+  commit/path, archive commit/path/bytes/SHA-256, primary preview
+  bytes/media/SHA-256, Catalog SHA-256, and `template` or `full` mode.
+- Public Provider identity: `templateId`, semantic `releaseVersion`, public
+  content digest, Catalog digest, immutable archive repository/commit/path,
+  byte count and SHA-256, plus the preview identity.
+
+Always pass the returned provider and selector unchanged to
+`figure_library_describe`, `figure_library_preview`, and materialization.
+Same-named templates from different providers do not shadow one another.
+
+FigureYa is upstream-published but locally `not_reviewed`; its code is
+`provided` and `not_run`. Never describe a FigureYa search result as locally
+approved, reproduced, or verified by SFL.
+
+Community and personal public templates likewise separate
+`upstreamStatus`, `publisherVerified`, `curationStatus`, `renderValidation`,
+`localReviewStatus`, and `plotExecutionByRecipient`. Central curation or a
+publisher signature never becomes the recipient's Local approval.
+
+Local Published search cards and details inherit warnings from the immutable
+Review bound by the exact Release and display separate plot-execution,
+upstream-workflow, and scientific-validation summaries. They do not fall back
+to the current Working Head and do not collapse a plot `passed` result into a
+claim of complete reproduction.
+
+The host Agent and MCP App paginate all matched candidates through
+`figure_library_search_page`; the App renders each usable candidate as a real
+lazy-loaded `<img>`. Clicking a title or non-interactive card area toggles local
+selection with a visible marker and count; it does not create a preview receipt
+or authorize materialization. Clicking the thumbnail or **查看详情** opens an
+accessible dialog with a larger candidate image, the complete description,
+and only metadata actually present in the search result. This basic detail is
+fully local to the App: it works without `serverTools`, does not call the
+Agent, and does not update model context.
+
+After presenting the page in the App or host image display, the Agent must
+wait for user selection. Ordinary hosts may first retrieve current-page
+thumbnails through the image tool or resource URIs below. The Agent must not call
+exact preview for every candidate or substitute a backend `view_image` pass.
+Only an explicit request such as “帮我选择模板” permits limited visual review
+of a small top-ranked subset. Once the user submits a plotting task, the Agent
+must process every selected task item rather than treating the items as
+alternatives.
+
+When Host `serverTools` is available, **查看精确预览** calls App-only
+`figure_library_preview_exact`, which returns the exact image and one-time
+`previewChallenge` in component-only `_meta`. It never accepts a destination,
+writes files, downloads archives, or accesses the network. The confirmation
+button remains disabled until that exact `<img>` fires `load`; `error` keeps it
+disabled. Clicking **确认并交给 Agent** calls App-only
+`figure_library_confirm_selection`, then sends only the provider, selector,
+preview hash, receipt, and compact selection summary through
+`updateModelContext`.
+
+When `serverTools` is absent but `updateModelContext.text` is available, the
+exact-preview action stays disabled and the separate button becomes **选择并交给
+Agent 审核**. Only that click submits one compact candidate through
+`updateModelContext`; the Agent may call `figure_library_preview_exact_headless`
+once for that candidate, review it, call
+`figure_library_confirm_selection_headless`, and create a read-only materialize
+plan. It must not inspect other candidates, Apply, or claim that the exact
+image loaded in the App. If `updateModelContext` is also absent, selection
+handoff remains disabled with an explicit capability error.
+
+When the Host has no Apps UI, the Agent can call
+`figure_library_create_plot_task_headless` after the user explicitly selects
+one or more candidates in conversation. The tool verifies each unchanged
+provider-qualified selector against the session-bound result set and returns
+the same v2 task structure as the App handoff. It creates no persistent queue
+and grants no preview, Materialize, execution, or installation approval.
+
+The current plotting-task handoff is
+`figure-library.app-plot-task-handoff.v2`. It contains one `plotTask` with a
+`taskItems[]` array; a single-item task and a batch use the same structure. Each
+item carries its exact selector and independent `previewState`, `materialState`,
+and `executionState`. Missing facts are `unknown`. The handoff expresses the
+user's plotting intent, but it does not itself create a preview receipt, approve
+Materialize, authorize code execution, or authorize dependency installation.
+Older v1 `agent_plot_set` and `headless_exact_review` messages are compatibility
+inputs for Hosts and must be normalized conservatively without inventing those
+facts.
+
+`figure_library_describe` publishes these App/headless tool names, the
+component thumbnail `_meta` key, the model-image exclusion flag, receipt gate,
+and diagnostics export/resource capabilities so Hosts can inspect the exact
+0.5.3 boundary without guessing.
+
+`figure_library_preview` remains a compatibility tool that returns/copies one
+standard MCP image, but it never authorizes materialization and must not be
+presented as sidebar display evidence.
+
+## Ordinary MCP guidance and candidate images
+
+These interfaces are available without loading the App or advertising the MCP
+Apps extension. Tool availability does not prove a host can display images.
+`hostIntegrationCapabilities` in search/describe and the guidance response
+advertise the ordinary tools, thumbnail resource template, limits and receipt gate.
+
+### Core Skill and reference retrieval
+
+`figure_library_get_skill({ document?: string })` defaults to `SKILL.md` and
+works before Library/workspace binding. It returns the unchanged bundled text,
+`document`, `uri`, `mimeType`, file `sha256`, `serverVersion`, a content-derived
+`guidanceRevision`, the `documents` inventory and `capabilities`. Metadata is
+also present as JSON in text content for bridges that omit structured results.
+
+The same documents are listed/readable as MCP resources below
+`figure-library://guidance/figure-library/`. Relative links resolve against the
+current document URI or local directory. The inventory includes optional helper
+source and its notices; reading source does not execute it. Only exact inventory
+IDs are accepted by the tool: paths, aliases and traversal are rejected with
+`guidance_not_found`. The inventory is loaded from the package once per session,
+so local files and MCP guidance have one maintained source. Text retrieval does
+not itself install or activate a native host Skill.
+
+### Candidate thumbnails
+
+Search and pagination add `thumbnailUri` to candidates with a readable thumbnail.
+The URI is `figure-library://candidate-images/{resultSetId}/{candidateId}` and
+can be read with `resources/read` to obtain the binary image as a Base64 `blob`.
+It is a session-bound MCP resource, not an HTTP URL for a WebView `img.src`.
+Resources are discovered through search and the resource template; dynamic
+candidate images are not enumerated by `resources/list`.
+
+`figure_library_get_candidate_images({ resultSetId, candidateIds })` returns
+standard MCP `image` blocks, each preceded by a candidate ID/title/provider label.
+Its `images[]` metadata preserves request order and includes `candidateId`,
+`providerId`, `exactSelector`, `title`, `uri`, canonical thumbnail `sourceSha256`,
+and the actual transport `mimeType`, `byteLength` and `sha256`. Transport hashes
+are distinct from canonical asset identity, especially when images are resized.
+Metadata is also serialized into text content; Base64 is kept in image blocks.
+
+A call accepts 1–12 unique IDs belonging to that result set, with the existing
+256 KiB per-image and 3 MiB total Data URL ceilings. Requested-image count does
+not change rendition policy: the tool and resource paths use the same fixed
+12-image budget. Duplicate or cross-result IDs return `preview_selection_mismatch`;
+missing/unreadable images return `preview_unavailable` without a partial image
+response. Catalog or Library binding changes, an evicted result or a different
+server session return `search_results_stale`. Resource read failures are MCP
+errors rather than successful image responses. Image reads recheck result state
+after loading and never download full template archives.
+
+`figure_library_search_page` now has both App and model visibility. Its inputs
+and opaque cursor semantics are unchanged. Search text includes result-set ID,
+page metadata, candidate IDs, thumbnail URIs and exact selectors, so a bridge
+must not invent identities from titles or list positions.
+
+Neither thumbnail path issues a challenge or receipt. User selection or explicit
+delegation still precedes exact headless preview/review/confirmation. The exact
+headless preview also exposes `PREVIEW_CHALLENGE` in its text response. All
+materialization and replay gates below remain unchanged. An Agent receiving
+an image is not proof the user saw it on their screen.
+
+## Exact materialization
+
+### Local application and shared business service
+
+The local application directly calls the shared Library service. It does not
+create an MCP Client, perform an internal MCP handshake, or proxy its requests
+through an MCP Server. `src/server.ts` mounts the same business operations as
+external MCP tools; the SDK and ordinary stdio integration remain available.
+Each service instance owns its result sets, preview challenges and cached plans.
+Sharing a Library directory does not make different service sessions interchangeable.
+
+The local HTTP interface is a local application API, not a Streamable HTTP MCP
+endpoint. It validates its loopback origin and authenticates requests. Its
+operation allowlist excludes model/headless preview confirmation and remote PR
+creation. Local writes require an explicit approval of the submitted plan digest
+in addition to the existing business Plan/Apply checks.
+
+A private local preview/confirmation path uses `confirmationMode: local`.
+Confirmation requires the exact displayed transport-image SHA-256, an image-load
+assertion and an explicit user-confirmation assertion. These are client facts,
+not proof obtained by the server that the screen was visible to a human. Local
+challenges cannot be confirmed through the App or headless confirmation tools;
+other newly issued challenges are likewise bound to their originating interface.
+Local receipts obey the existing one-use and stale-state materialization gates.
+No local confirmation tool is added to the standard model-visible MCP inventory.
+
+### Preview, confirmation and writes
+
+Materialization protocol v2 is preview/confirm/plan/apply only. A plotting task
+may be submitted before every exact preview has been viewed; the Host/Agent
+performs the required preview/confirmation sequence for each item before
+planning Materialize:
+
+1. Search and retain `resultSetId`, `providerId`, and `exactSelector`.
+2. Choose the capability-aware confirmation path:
+   - Apps Host with `serverTools`: the App calls App-only
+     `figure_library_preview_exact` and `figure_library_confirm_selection` only
+     after the exact image visibly loads and the user clicks confirmation.
+   - Apps Host without `serverTools` but with `updateModelContext.text`: after
+     the user clicks **选择并交给 Agent 审核**, call model-visible
+     `figure_library_preview_exact_headless` once for that single candidate and
+     then `figure_library_confirm_selection_headless`.
+   - Host with no Apps UI: use the same model-visible tools only after the user
+     selects a candidate or explicitly delegates selection to the Agent.
+   Both headless routes cannot technically prove that the user saw the image in
+   the App; acceptance reports must preserve this boundary.
+3. Pass the returned single-use `previewReceipt` with the unchanged
+   `providerId`, `exactSelector`, absolute `destination`, optional absolute
+   `sourcePackDir`, and `allowNetwork` to
+   `figure_library_plan_materialize`. Missing receipts return
+   `preview_required`; mismatches, changed preview/catalog/root, replay, or
+   server restart are rejected. A receipt has no wall-clock TTL but is valid
+   only in the issuing server session and is consumed after one successful
+   plan.
+4. Present the exact selector, target, confirmation mode, and acquisition
+   policy.
+5. `figure_library_apply_materialize` with `planDigest`, `operationId`,
+   `expectedProviderId`, and `expectedTarget`. Apply consumes only the plan and
+   does not request the receipt again.
+
+The target is `<destination>/<templateId>` and is never overwritten. All
+providers use a common envelope:
+
+```text
+<destination>/<templateId>/
+├── TEMPLATE.md
+├── template.json
+├── template.lock.json
+├── assets/
+│   ├── visuals/
+│   ├── code/
+│   ├── references/
+│   └── evidence/
+└── upstream/                 # when supplied by the exact Provider payload
+```
+
+Keep `assets/` and `upstream/` unchanged when exact replay matters. Write
+project adaptations separately. The lock records the provider-qualified exact
+identity and file hashes so another project or Agent can reproduce the same
+selection without project pins.
+
+`template.lock.json` alone is not server authority. Durable Apply replay also
+requires the immutable global-Library Receipt at
+`store/operations/receipts/public-materializations/<providerId>/<operationId>.json`.
+The Receipt binds the public plan, exact selector, complete target inventory,
+and a hash of the physical target path without storing that absolute path.
+Replay revalidates the current provider identity and every target byte; a
+pre-created or copied lock without the Receipt is never reported as success.
+
+Project-target, selector, extraction, and integrity failures are terminal. Do
+not retry the same call, change mode/provider, use a shell downloader, fetch a
+full repository, or generate a substitute. Gitee-to-GitHub fallback is part of
+one configured archive acquisition policy, not an Agent retry. A verified
+archive whose global cache write fails may still complete the current project,
+but must report `cachePersisted=false` and the exact persistence error.
+
+Personal module materialization uses `figure-library.module-template-lock.v1`.
+Its lock records the Provider/module identity, source and archive repository
+commits, archive path/bytes/SHA-256, primary preview identity, selected mode,
+planned and exact selectors, complete output inventory, per-module licenses,
+publisher facts, and `codeExecutedBySflClient: false`. `template` extracts only
+the manifest's exact `requiredFiles`; `full` extracts every declared file from
+the cleaned ZIP. The single personal content repository is the source for both
+`modules/<moduleId>/` and `archives/<moduleId>.zip`; no second archive
+repository is consulted.
+
+The Open Figure Modules Source Pack uses
+`figure-library.module-source-pack.v1`, is stored by default at
+`<globalLibraryRoot>/source-packs/open-modules/`, contains selected archive ZIPs
+and its manifest, and is never bundled into an SFL plugin. A valid partial pack
+may omit a requested module and continue to configured archive sources when
+networking is allowed. An `archives/<moduleId>.zip` written before the
+manifest update is adopted on the next cache of that Catalog module; unknown
+extra files remain an unsafe inventory. A corrupt manifest, other unsafe
+inventory, or Provider/module/commit/path/byte/hash mismatch is a hard failure. Network
+resolution tries the global local mirror override, then the official Gitee
+source shipped in the bundled Catalog, then any other Catalog-configured
+sources, before the canonical GitHub archive. The bundled default is
+`https://gitee.com/livenever/ScientificFigureLibrary-personal/raw/{archiveCommit}/{archivePath}`.
+Every source is checked for its
+allowed HTTPS origin, fixed commit/path, response size, SHA-256 and complete ZIP
+inventory; no module file is executed. A successfully verified network archive
+is persisted to the global Source Pack and an extracted template cache; the ZIP
+is retained. If cache persistence fails after verification, the current project
+may still complete but the result must report `cachePersisted=false` and the
+exact persistence error.
+
+An optional machine-local override (not required for the official Gitee
+mirror) lives at
+`<globalLibraryRoot>/network/mirrors.json`:
+
+```json
+{
+  "openModules": {
+    "sources": [
+      {
+        "kind": "gitee-mirror",
+        "urlTemplate": "https://gitee.com/<owner>/<repo>/raw/{archiveCommit}/{archivePath}",
+        "priority": 1
+      }
+    ]
+  }
+}
+```
+
+The override changes transport order only; it cannot change the canonical
+repository, commit, path, size, or digest. The mirror is attempted before the
+canonical GitHub archive, and a failed or mismatched mirror is rejected before
+fallback.
+
+Maintainer commands are offline and support `--check` and `--write`:
+
+```text
+npm run modules:validate
+npm run modules:archive
+npm run modules:catalog
+npm run modules:source-pack
+```
+
+`--check` is read-only and reports include/exclude and generated-tree
+differences. `--write` stages and atomically replaces only generated output;
+it never creates a commit, pushes, creates a GitHub repository, runs R, installs
+dependencies, modifies the Gallery, or modifies the Local Published
+Library.
+
+## Provider source management
+
+`figure_library_list_provider_sources` is completely read-only and offline. It
+reports Local, bundled FigureYa, bundled Open Figure Modules, frozen
+Community compatibility, and configured dynamic personal Providers,
+including enabled/default-search state, active sequence/digest/key, verified
+snapshot status, template count, and the last safe error.
+
+Personal Provider changes use
+`figure_library_plan_provider_source_change` followed by
+`figure_library_apply_provider_source_change`. Supported actions are `add`,
+`update`, `configure`, `remove`, and `trust_reset`. A first Add requires the
+expected `providerId`, an HTTPS manifest URL, and a separately obtained raw
+32-byte Ed25519 public key. Planning may fetch and verify a candidate but never
+writes configuration or snapshots. Show every URL, sequence/digest/key change,
+template delta, target path, default-search choice, and warning; Apply only
+after explicit confirmation.
+
+Bundled FigureYa, Community, and Open Figure Modules may be removed from
+ordinary search in the local client. That writes a local preference, leaves
+install files in place, and can be restored with `configure` `enabled: true`.
+It does not unregister the compiled channel or delete materialized projects.
+Local Published cannot be removed. Personal `remove` still only unregisters
+the signed source.
+
+Apply fetches the exact planned manifest again, rejects stale/rollback/
+equivocation/signature/DNS/path changes, verifies all payloads in staging, then
+atomically activates an immutable snapshot. A failed update preserves the
+last-known-good snapshot. Remove unregisters the source but does not delete
+snapshots or materialized projects. `trust_reset` is exceptional recovery: it
+must display and explicitly confirm both the old and new key fingerprints.
+
+## Sanitized public submission export
+
+### Runtime closure for new plot templates
+
+New or updated Local Published plot templates may declare
+`runtime: figure-library.runtime-closure.v1`. The closure binds the selected
+canonical implementation, each required runtime input, its Local Published
+asset path, the path used by the code, and the generated PNG output. Publish
+planning validates the closure against the immutable revision inventory; it
+never reads a Gallery, inbox, project directory, or user home as an implicit
+fallback. Older Releases without this optional field remain readable, but a
+new public export must either provide a valid closure or use an explicit
+legacy export path with its limitations reported.
+
+Public publication starts from one exact, currently reachable Local Published
+Release; it never accepts a Working Revision, an entire Library, or an
+unreachable historical Release. Use
+`figure_library_plan_publication_export` to declare every source asset as
+included or excluded and, for each included asset, its public path, role,
+source, and license. The only accepted payload classes are explicitly selected
+code, synthetic data, a preview actually generated from the selected code and
+data, and documentation. Source-reference media, screenshots, PDF/TIFF
+extracts, evidence, private lifecycle state, and machine paths are excluded.
+DOI and URL text may remain as provenance.
+
+The Plan shows source/output digests, generated-preview trace, metadata and
+license conflicts, excluded private state, and `written: false`. Parent
+`unknown` or `private_reference` status is not a public license: the publisher
+must attest rights for the selected assets and explicitly acknowledge any
+metadata conflict. After approval,
+`figure_library_apply_publication_export` revalidates the exact Release and all
+asset bytes and writes a deterministic, previously absent target containing:
+
+```text
+submission.json
+licenses.json
+render-receipt.json
+inventory.jsonl
+payload/
+  template.json
+  code/**
+  data/**
+  preview/preview.png
+  docs/**
+```
+
+Export Apply is local only: it does not access the network, sign content,
+execute plotting code, create a GitHub PR, publish the Local Library, or include
+Library IDs, locators, histories, operations, receipts, quarantine, other
+templates, or absolute paths. GitHub Archive/Catalog PR creation is a separate
+plan/apply gate and never merges a PR automatically.
+
+## Staged central GitHub publication PRs
+
+GitHub publication uses the official `gh` CLI only. SFL never calls
+`gh auth token`, reads `hosts.yml`, stores a token, starts an interactive login,
+or opens a browser. `figure_library_github_auth_status` reports the current
+login, host, central-repository permissions,
+`credentialStorage=managed_by_github_cli`, and whether secure storage was
+actually verified. If login is missing,
+`figure_library_github_auth_instructions` returns a command for the user to run
+in their own terminal.
+
+`figure_library_plan_publication_pr` and
+`figure_library_apply_publication_pr` implement two separate, manual-review
+gates:
+
+1. **Archive PR** — validate one sanitized submission, create a deterministic
+   ZIP, and propose only
+   `archives/<templateId>/<releaseVersion>/<templateId>-<releaseVersion>.zip`
+   in `jarxunlai/ScientificFigureLibrary-community-archives`.
+2. **Catalog PR** — permitted only after that Archive PR was manually merged.
+   It reloads the ZIP from the exact merge commit, verifies every identity, and
+   proposes the Catalog entry, thumbnail, preview manifest, aggregate Catalog,
+   and human review record in `jarxunlai/ScientificFigureLibrary-community`.
+
+Plan is read-only and displays the expected login, repository/base, branch or
+fork, commit/PR text, complete file list, and digests. Apply rechecks login,
+permission, base commit/tree, source, and files; it uses `gh api` and Git Data
+API rather than the current cwd or a git remote. It cannot modify `.github/**`,
+CI, policy, or an existing archive path. Operation receipts contain no secret
+and make a stable `operationId` replay the existing open/merged PR rather than
+create a duplicate.
+
+Neither SFL nor its CI merges a PR. The user must review and manually merge the
+Archive PR before a Catalog Plan can exist, and must separately review and
+manually merge the Catalog PR. An export, Archive PR, or Catalog PR that has not
+been merged is not a public Community release.
+
+## CiteBox and other intake adapters
+
+CiteBox figures enter through an explicit export/API/MCP handoff. They are not
+mixed into ordinary search before local review, and SFL must never access the
+CiteBox SQLite database directly.
+
+The host selects a CiteBox Figure, obtains self-contained exported assets, and
+then creates a Working Revision with `intake.adapterId: "citebox"`. Preserve
+the selected Figure ID, paper DOI/title, figure label, page, caption, export
+hash, retrieval time, and other available provenance in `sourceManifest` and
+Revision provenance. Copy all selected assets into the Revision. CiteBox
+authority or publication status is provenance only and is not inherited as SFL
+approval.
+
+Other integrations follow the same adapter contract under
+`store/imports/<adapterId>/<importId>/`: explicit source manifest, selected
+asset hashes, self-contained immutable Revision, receipt, and local review.
+
+## Migration and portability
+
+Binding can optionally stage a non-destructive copy of a legacy flat-v1
+Library with `migrationMode: "copy_legacy"`. Staging does not make entries
+searchable. Each template is adopted explicitly through the versioning
+plan/apply tools and receives a receipt; original flat content is retained.
+
+Portable bundle operations are exposed as explicit MCP plan/apply pairs and
+implemented by `src/portable-bundles.ts`:
+
+- full Library backup/export;
+- exact Published-template export;
+- full Library restore;
+- full Library fork;
+- Published-template bundle import as a new Working Revision.
+
+Use `figure_library_plan_bundle_export` /
+`figure_library_apply_bundle_export` for a full backup or exact Published
+template export. Export Apply must echo the visible absolute target as
+`expectedTarget`; the Library stores only its digest in an immutable pre-write
+intent. If the server stops after the complete bundle rename but before its
+receipt, the same `operationId + planDigest + expectedTarget` verifies every
+byte and rolls the receipt forward after restart. Use `figure_library_plan_full_restore` /
+`figure_library_apply_full_restore` for restore or fork. Use
+`figure_library_plan_template_bundle_import` /
+`figure_library_apply_template_bundle_import` to import a Published template as
+Working. In the same server session, Apply needs the visible `planDigest` and
+a stable operation ID. Apply does not accept a client-authored opaque plan. If
+the in-memory plan is unavailable, the tool
+returns terminal `plan_not_available` and requires a new plan rather than an
+identical retry, except when an authoritative pre-write export intent and its
+complete exact target allow deterministic recovery.
+
+Full backups exclude `indexes/` and `locks/`. Restore preserves the source
+`libraryId`, requires explicit authority-transfer confirmation, and does not
+change the active locator. Fork creates a new `libraryId` and records
+`forkedFromLibraryId`. Importing a Published-template bundle never inherits the
+source Library's approval; it creates a Working Revision requiring local review
+and publication.
+
+See [`docs/GLOBAL_LIBRARY_0.6.md`](GLOBAL_LIBRARY_0.6.md) for the storage,
+locator, lifecycle, migration, and portability model.
+
+## Structured diagnostics and export
+
+Each MCP Server process creates an independent diagnostics session and writes
+bounded JSONL outside the global Library and project repositories. Set
+`SFL_DIAGNOSTICS_DIR` to an absolute directory to override the system temporary
+diagnostics directory. The default limits are 5 MiB per JSONL segment and
+50 MiB total across JSONL/ZIP files. Rotation is oldest-first. A diagnostics
+write failure never fails search, preview, confirmation, or planning; affected
+tool/status output reports `diagnosticsDegraded` instead.
+
+The logger records fixed structured events for server startup, capability
+detection, search stages, candidate detail open/close, exact preview request,
+image load/error, confirmation, model-context update, materialization planning,
+and tool failures. App-only `figure_library_record_ui_event` accepts only a
+fixed enum plus the current result/candidate identifiers and bounded numeric
+metrics; it rate-limits at 120 events/minute and 1000 events/session. It is an
+internal component tool, not an Agent workflow tool.
+
+Call public `figure_library_export_diagnostics` only when the user explicitly
+requests logs/a diagnostic bundle, supplies a correlation ID or time range, or
+accepts export after a failure. Defaults are current session, sanitized ZIP,
+no user text, and no absolute paths. The ZIP contains:
+
+```text
+scientific-figure-library-diagnostics-<timestamp>.zip
+├── summary.md
+├── events.jsonl
+├── errors.jsonl
+├── environment.json
+└── manifest.json
+```
+
+The manifest records schema/app version, session, creation time, file sizes and
+SHA-256 values, total payload bytes, scope, and redaction mode. Image bytes,
+Data URLs, selectors, preview challenges/receipts, plan tokens, credentials,
+cookies, environment variables, conversation/free text, source assets, and
+sensitive paths are excluded or redacted. `includeUserText` is accepted for
+forward compatibility, but 0.5.3 does not collect conversation/free text and
+therefore still records `userTextIncluded: false`. Absolute paths appear only
+when the user explicitly sets `includeAbsolutePaths: true`.
+
+The result contains only a compact summary, size, SHA-256, and a session-bound
+`figure-library://diagnostics/<bundleId>` resource link; it never injects the
+JSONL or ZIP into model-visible structured content. If the Host cannot download
+resource links, report that integration limitation. A local path is returned
+only when absolute paths were explicitly requested, and local file existence
+alone must not be described as delivery to the user.
+
+## MCP tools in the 0.6 standard core
+
+| Area | Tools |
+| --- | --- |
+| Guidance | `figure_library_get_skill` |
+| Workbench and retrieval | `figure_library_get_candidate_images`, `figure_library_search_page`, `figure_library_open`, `figure_library_search`, `figure_library_describe`, `figure_library_preview`, `figure_library_preview_exact_headless`, `figure_library_confirm_selection_headless`, `figure_library_create_plot_task_headless`, `figure_library_source_status` |
+| App-only component tools | `figure_library_preview_exact`, `figure_library_confirm_selection`, `figure_library_record_ui_event` |
+| Diagnostics export | `figure_library_export_diagnostics` |
+| Global binding | `figure_library_plan_bind_global`, `figure_library_apply_bind_global` |
+| Write-lock recovery | `figure_library_plan_recover_write_lock`, `figure_library_apply_recover_write_lock` |
+| Review inspection | `figure_library_review_open`, `figure_library_preview_working_revision`, `figure_library_template_history`, `figure_library_diff_revisions` |
+| Direct intake | `figure_library_plan_working_revision`, `figure_library_apply_working_revision` |
+| Gate, publish, discard, restore, adoption | the lifecycle plan/apply pairs listed above |
+| Exact acquisition | `figure_library_plan_materialize`, `figure_library_apply_materialize` |
+| Portable bundles | `figure_library_plan_bundle_export`, `figure_library_apply_bundle_export`, `figure_library_plan_full_restore`, `figure_library_apply_full_restore`, `figure_library_plan_template_bundle_import`, `figure_library_apply_template_bundle_import` |
+| Provider source management | `figure_library_list_provider_sources`, `figure_library_plan_provider_source_change`, `figure_library_apply_provider_source_change` |
+| Sanitized publication export | `figure_library_plan_publication_export`, `figure_library_apply_publication_export` |
+| Staged central GitHub PRs | `figure_library_github_auth_status`, `figure_library_github_auth_instructions`, `figure_library_plan_publication_pr`, `figure_library_apply_publication_pr` |
+
+There are no `figure_capture_*`, project status/pin, direct-write import, sync,
+archive/reconcile, or one-step materialize tools in the standard 0.6 server.
+
+## Distribution
+
+The same standard MCP server and Skill are packaged for Wisp, Codex, Claude,
+Cursor, Pi, and DeepSeek Harness (dsh). Do not register a raw
+`mcp_servers.figure-library` entry **and** a host plugin at the same time; that
+duplicates tools. The same rule applies if a local-app MCP config is already
+active: do not also `pi install npm:scientific-figure-library` or
+`dsh plugin add scientific-figure-library`.
+
+```bash
+npm run package:plugins
+```
+
+This writes four artifacts into `release/`. Pushing a stable tag `vX.Y.Z`
+packages those ZIPs, the npm tarball, local-client installers, SHA-256 sidecars,
+and the Wisp update feed, then uploads them to the GitHub Release. See
+[basic CI](CI.md#github-release). Local `package:*` scripts do not upload.
+
+The four host archives are:
+
+- `scientific-figure-library-wisp-0.9.2.zip` — install from Wisp **Settings → Plugins**
+- `scientific-figure-library-codex-0.9.2.zip` — Codex plugin with `.codex-plugin/plugin.json`, `.codex-plugin/mcp.json`, and `skills/figure-library`
+- `scientific-figure-library-claude-0.9.2.zip` — Claude Code plugin with `.claude-plugin/plugin.json`, `.claude-plugin/mcp.json`, and auto-discovered `skills/`
+- `scientific-figure-library-cursor-0.9.2.zip` — Cursor plugin with `.cursor-plugin/plugin.json`, plugin-root `mcp.json`, and auto-discovered `skills/`
+
+Each package uses its Host's plugin-root contract. Codex resolves `cwd: "."`
+from the installed plugin root, Claude expands `${CLAUDE_PLUGIN_ROOT}`, Cursor
+expands `${PLUGIN_ROOT}`, and Wisp continues to expand `${WISP_PLUGIN_ROOT}`.
+Therefore the server entry does not depend on the project directory from which
+the Host was opened. Cursor's official marketplace is Git-based; the ZIP is the
+local install path (`~/.cursor/plugins/local/figure-library/`).
+
+The automated package smoke extracts each ZIP under a path containing spaces,
+starts the packaged server from an unrelated project cwd, and completes MCP
+`initialize` plus an exact `tools/list` inventory. This proves the packaged
+stdio and Host root-resolution contracts only. It does **not** prove that a
+real Codex Desktop installation has formed an exact ready client or injected
+the tools into a Desktop session; those observations remain a manual
+pre-release field acceptance from an arbitrary project directory.
+
+The MCP App may request `fullscreen` or `pip` if the Host lists those modes in
+`availableDisplayModes`. Codex has no docked-sidebar display mode.
+
+Build a standalone npm package:
+
+```bash
+npm run package:npm
+npm install --global ./release/scientific-figure-library-0.9.2.tgz
+```
+
+Use `scientific-figure-library` as the MCP command after installation.
+
+Pi loads Skill and MCP from that npm package:
+
+```bash
+pi install npm:pi-mcp-adapter
+pi install npm:scientific-figure-library
+```
+
+DeepSeek Harness loads the same package as a bundle:
+
+```bash
+dsh plugin --profile web add scientific-figure-library
+```
+
+## FigureYa Source Pack
+
+The plugin contains the FigureYa catalog and thumbnails; the npm package used by
+Pi and dsh contains the catalog and pinned thumbnail identities, downloading the
+image bytes on demand. Neither contains the roughly 3 GiB
+archive collection. A Source Pack is an ordinary directory containing pinned
+per-module ZIPs from FigureYa-compressed:
+
+```text
+FigureYaSourcePack/
+├── FigureYa59volcanoV2.zip
+└── archives/
+    └── FigureYa9heatmap.zip
+```
+
+Pass an absolute directory as `sourcePackDir` or set
+`FIGUREYA_SOURCE_PACK_DIR`; when omitted, the bound global Library automatically
+uses `source-packs/figureya/`. Archive resolution is:
+
+1. local Source Pack;
+2. bases configured in `FIGUREYA_ARCHIVE_BASE_URLS`;
+3. the commit-pinned FigureYa-compressed archive on GitHub.
+
+When a network archive is verified during Materialize Apply, SFL writes it back
+to the global FigureYa Source Pack, keeps the ZIP, updates
+`figureya-source-pack.manifest.json`, and creates an extracted `templates/`
+cache. A cache-write failure is reported as `cachePersisted=false` while the
+already verified current project may still complete.
+
+Create a small transport pack from a local checkout:
+
+```bash
+npm run package:source-pack -- \
+  --source /path/to/FigureYa-compressed \
+  --name volcano \
+  --modules FigureYa59volcanoV2
+```
+
+The helper verifies selected ZIP identities and caps a transport pack at 200
+MiB. Extract the resulting
+`release/figure-library-source-pack-volcano-0.9.2.zip` before use.
+
+## Catalog development
+
+Regenerate the bundled catalog from local checkouts:
+
+```bash
+git -C /path/to/FigureYa-compressed ls-tree --name-only HEAD |
+  npm run catalog -- \
+    --source /path/to/FigureYa \
+    --figureya-commit <figureya-commit> \
+    --compressed-commit <compressed-repo-commit> \
+    --compressed-tree /path/to/compressed-github-tree.json
+```
+
+### Vendor the reviewed Community Catalog
+
+Ordinary startup, search, build, and packaging never refresh the Community
+Catalog over the network. After the Archive PRs and their corresponding Catalog
+PRs have both passed human review and been manually merged, explicitly sync the
+fixed final Community commit from a clean checkout:
+
+```powershell
+$communityCheckout = Resolve-Path "<checked-out-community-repo>"
+npm run community:sync -- `
+  --source $communityCheckout `
+  --commit <exact-40-hex-community-commit>
+```
+
+The sync command creates an isolated provenance repository and fetches the
+fixed central HTTPS URL rather than trusting a checkout-defined remote or Git
+configuration. The requested commit must equal the freshly fetched central
+`main`; its tracked modes/blob identities and vendored bytes must also match the
+clean local checkout. Only then does the command validate the aggregate and
+standalone Catalog entries, preview manifest, PNG identities, license mapping,
+and exact inventory before atomically replacing `assets/community`. The source
+checkout and target must be separate directory trees. Packaging has an
+additional final-release gate that requires the three reviewed 1.0.0 seed
+releases; the empty bootstrap snapshot is valid for development tests but
+cannot be packaged as the 0.9.2 release.
+
+## Markdown descriptions and bundled Skills
+
+One core figure-library Skill routes to bundled references: library workflows
+cover the lifecycle, figure-description drafts evidence-grounded biological use
+cases, figure-organization keeps adapted R/Python code readable, and
+figure-style checks faithful rendering. The references are not separate Skills. The server never executes their code or contains a
+model. Host execution/viewer tools and project runtime approval are still needed.
+
+New or updated direct Working plans require a non-empty application (up to
+8,000 characters). description (8,000), application and dataProfile (4,000)
+retain Markdown; search uses a separate plain-text projection. Duplicated
+description/application text emits a warning, not a scientific judgment.
+Older immutable JSON does not require application. At read time, an explicit
+application wins; otherwise a recognizable scenario section may be extracted
+from description. Missing scenarios are not synthesized from visualProfile.
+
+The detail view renders headings, paragraphs, lists, tables, quotations,
+emphasis and code. Raw HTML and remote images are disabled; DOMPurify applies
+an allowlist before insertion. Only explicit clicks request http/https links
+through the Host. Unsupported links remain copyable. Inputs, code files and
+packages stay visible; provenance, validation and identities are collapsed.
+
+New Open Figure Modules preserve the same Markdown fields in module.yml and
+generate description.md from those fields. scientificQuestion is optional in
+v1 module metadata. Existing modules and FigureYa catalog files are unchanged.
+
+Open Figure PR Plan returns similarSearch.resultSetId. Call figure_library_search
+with that resultSetId and its unchanged query/providers/filters/limit to present
+the exact cached candidates. Apply requires that same expectedResultSetId,
+server-confirmed presentation, and similarReviewConfirmed=true when candidates
+exist. Text-only Hosts use the same result set and explicit human confirmation;
+server presentation is not proof that a human has looked at the image.
+Identity labels mean exact normalized titles, preview SHA or OFM canonical-code
+SHA matches; other hits are similar. Neither is a scientific duplication verdict.
+Path conflicts on main or open PRs still block before GitHub writes. Existing
+archive manifests must be readable and valid; they are never replaced with an
+empty inventory after a read error. Only a two-commit PR is created, never merged.
+
+## License
+
+Project code is MIT licensed. FigureYa-derived catalog data, thumbnails, and
+downloaded templates remain CC BY-NC-SA 4.0. Bundled Community template code is
+MIT; its synthetic data, generated previews/thumbnails, and documentation are
+CC BY 4.0 and retain per-release attribution in the Community Catalog and
+archive. User-supplied and adapter-imported material keeps its recorded source
+license. See
+[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md).
+
+
+## 本地轻量安装包的预览交付
+
+本地 DMG / Windows ZIP 与 npm 包（Pi / dsh 安装路径）的 FigureYa 与 Open Figure Modules bootstrap 可包含 `preview-downloads.json`，其每个图片身份必须与既有预览 manifest 完全一致。图片来源固定为构建提交中的文件；不改变 Provider、exact selector 或 Published Release 的身份。
+
+候选可返回 `previewDelivery: "download"`。此模式下 `previewAvailable` 表示存在可获取的固定身份，并不承诺网络可达或已经缓存；当前页图片传输结果由 `searchPreviewAvailable` / `searchPreviewStatus` 表达。搜索不会下载非当前页候选的图片。精确预览只有取得、校验和传输真实图片后才可确认。缩略图下载失败不改变精确图片身份，可重新请求预览。
+
+图片缓存位于用户缓存目录，按 SHA-256 寻址并校验大小和格式。本地客户端可对用户明确选择的一个图库预取该图库清单中的固定预览图；这不会改变搜索只下载当前页、精确预览只下载选中图片的契约。确认后的材料化重验证仅允许读取缓存，不隐式重新下载已确认图片；缓存缺失或损坏需重新预览确认。`allowNetwork` 仍控制模板归档材料化，不能当作此前浏览图片的网络开关。既有 Provider 签名快照更新策略保持独立。
+
+### Local gallery source caches
+
+The local Web client starts background work using authenticated POST `gallery-cache/start` with the same plan token and `confirmedBy: user` (HTTP 202). Authenticated GET `gallery-cache/tasks` reports process-local tasks with state, total, processed, current item, successes and per-item failures. Authenticated GET `gallery-cache/status` reports the shared preview-file count, each provider source-pack count, and latest task state. Replaying Start returns the same task; another running task for the same Library and provider is rejected. Navigation and browser refresh do not interrupt work. Exiting the backend interrupts tasks; automatic restart or cross-process task persistence is not provided. Existing Apply remains available and shares the same execution result.
+
+Private authenticated POST endpoints `gallery-cache/plan` and `gallery-cache/apply` support FigureYa and Open Figure Modules only. Plan accepts `providerId` and `mode` (`images`, `code`, `update`) and returns a session token, fixed-catalog counts, and Library-contained destinations. Apply requires that exact token and `confirmedBy: user`; expired plans, changed Library context, and changed catalogs are rejected. Concurrent/repeated Apply reuses the same in-session result. Results report image/archive successes and per-item failures; no cross-session completion replay is claimed.
+
+These operations prepare verified source archives and preview cache files only, never project materializations or execution. Copying a drawing prompt reuses the same source-pack cache; it does not write a third derived copy. Exact-preview receipts and materialization plan/apply remain required for Save to project. Update verifies and fills the current catalog's cache, not its upstream catalog version. Successful old fixed-version caches remain intact when a later item fails. FigureYa and Open Figure use their shared Library source-pack directories.
+
+## Unified publication protocol
+
+The service advertises publicationProtocolVersion=1 and bilingualTemplateTitles.
+figure_library_plan_publish accepts exactly one candidate or working selector, with
+target=local (default) or open_module (explicit). Candidate follows the Working asset
+input vocabulary but proposes links without confirmedBy and omits confirmations.
+It requires mode, a readable templateId, title, titleEn, scientificQuestion and application.
+An existing working selector includes templateId/revisionId/contentDigest/reviewDigest.
+Optional gateDecisions are reviewed with that exact existing Working, never auto-waived.
+
+Plan has no persistent writes. It returns approval=pending, the final proposed metadata,
+asset inventory, exact preview, digest and technical review. Host Gallery actions are
+reviewed alongside it and remain host-owned. Prospective selections are not evidence
+of prior human consent. Public preflight contains a contentSelector and no published
+exactSelector until the matching real Release exists. It includes licenses and similar
+candidates in this single review. Original/public availability does not relicense assets.
+
+figure_library_apply_publish accepts planDigest, operationId and, when the same review
+includes similar candidates, acceptSimilarCandidates=true. After human approval it
+creates/updates Working, applies explicit gate decisions, publishes locally and optionally
+submits a PR. It never executes code, moves Gallery files or merges a PR. Public submission
+uses gh and verifies jarxunlai. Plans are session-local and expire after 30 minutes.
+
+Durable operation journals under store/operations/unified-publications bind the original
+plan and completed stages. Same operationId resumes a confirmed partial operation across
+restart; completed operations replay without duplicate releases or PRs. Files or targets
+changed before application require a fresh plan. Public failure retains Local Published.
+Operation locks are never stolen; an abnormal process exit leaving a .lock requires
+operator inspection of stopped writers before removing only that operation lock.
+
+Optional titleEn is persisted in new revisions and projected to Local search, detail,
+materialization metadata and Open Module. Old records without it remain readable and
+are not rewritten. New public modules require a readable English title, not a derived
+slug. UI subtitles use ordinary grey text; identifiers remain separate. Routine data
+origin/execution states remain in technical metadata, not default template summaries.
+Legacy fine-grained operations remain supported. Host guidance must detect the new
+capability before using these tools; updating a checkout does not update an installed host.

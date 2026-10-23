@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Scientific Figure Library</title>
+  </head>
+  <body>
+    <main id="app">
+      <header>
+        <div class="brand-heading">
+          <img id="brand-logo" class="brand-logo" alt="Scientific Figure Library" />
+          <div class="brand-copy">
+            <p class="eyebrow">SCIENTIFIC FIGURE LIBRARY</p>
+            <h1>选择科学绘图模板</h1>
+            <p id="query" class="query">正在等待候选结果…</p>
+          </div>
+        </div>
+        <div class="header-side">
+          <p class="hint">点击卡片或标题即可勾选；详情用「查看详情」按钮打开</p>
+          <div id="display-controls" class="display-controls" hidden>
+            <button type="button" id="expand-browse">展开浏览</button>
+            <button type="button" id="keep-visible">保持可见</button>
+            <button type="button" id="reexpand">重新展开</button>
+          </div>
+        </div>
+      </header>
+      <p id="pip-summary" class="pip-summary" hidden></p>
+      <section id="plotting-help" aria-label="绘图提示"></section>
+
+      <section id="empty" class="empty" aria-live="polite">
+        <span id="empty-icon" class="state-icon" aria-hidden="true"></span>
+        <span>请在对话中上传图片或数据，也可以直接描述想画的图。</span>
+      </section>
+      <section id="cards" class="cards" aria-label="Scientific figure template candidates"></section>
+      <section id="plot-set-bar" class="plot-set-bar" aria-label="多选绘图模板">
+        <span id="plot-set-count" class="plot-set-count" role="status" aria-live="polite" aria-atomic="true">已选 0 个模板</span>
+        <button id="plot-set-submit" type="button" disabled>交给 Agent 绘制（0）</button>
+      </section>
+      <div id="toast-region" class="toast-region" role="status" aria-live="polite"></div>
+      <nav id="pagination" class="pagination" aria-label="候选分页">
+        <button id="previous-page" type="button" disabled>上一页</button>
+        <span id="page-status">等待搜索结果</span>
+        <button id="next-page" type="button" disabled>下一页</button>
+      </nav>
+      <footer id="status" aria-live="polite">
+        <span id="status-icon" class="status-icon" aria-hidden="true"></span>
+        <span id="status-text">点击标题或卡片空白处选择模板，“查看详情”用于浏览。工具运行审批不代表模板已选中；请以“已选”标记和计数为准。</span>
+      </footer>
+    </main>
+    <script type="module" src="/main.ts"></script>
+  </body>
+</html>

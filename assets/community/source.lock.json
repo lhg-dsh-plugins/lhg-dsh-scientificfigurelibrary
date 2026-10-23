@@ -1,0 +1,17 @@
+{
+  "schema": "figure-library.community-source-lock.v1",
+  "providerId": "io.github.jarxunlai.scientific-figure-community",
+  "catalogRepository": "jarxunlai/ScientificFigureLibrary-community",
+  "catalogCommit": "a7de6f13bd3e597984333f28c6f1bcf777d464f1",
+  "archiveRepository": "jarxunlai/ScientificFigureLibrary-community-archives",
+  "catalog": {
+    "path": "catalog.json",
+    "bytes": 374,
+    "sha256": "605d137a12bf2d6f67d82ab3c9527916e68c449ba27b2b20dbfed910c7fcd0f8"
+  },
+  "previewManifest": {
+    "path": "preview-manifest.json",
+    "bytes": 131,
+    "sha256": "ac6935bba41aed6b572b7aad4a7d9dd4c6f14072644c05c1ea28b357d526ecfa"
+  }
+}

@@ -1,0 +1,144 @@
+{
+  "name": "scientific-figure-library",
+  "version": "0.9.2",
+  "description": "Local image-code knowledge library with native macOS and local Web clients, plus MCP and Skill for Pi, DeepSeek Harness (dsh), Claude, Codex, Cursor, and Wisp.",
+  "keywords": [
+    "scientific-figures",
+    "figure-library",
+    "local-first",
+    "figure-templates",
+    "mcp",
+    "mcp-app",
+    "mcp-server",
+    "claude-science",
+    "wisp-science",
+    "pi",
+    "pi-package",
+    "pi-coding-agent",
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "visualization",
+    "publication-figures",
+    "reproducible-research"
+  ],
+  "homepage": "https://xuzhougeng.github.io/ScientificFigureLibrary/",
+  "type": "module",
+  "bin": {
+    "scientific-figure-library": "dist/index.js"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./dsh": "./.dsh-plugin/index.js",
+    "./package.json": "./package.json"
+  },
+  "pi": {
+    "extensions": [
+      "./.pi-plugin/extension.js"
+    ],
+    "skills": [
+      "./skills"
+    ],
+    "image": "https://raw.githubusercontent.com/xuzhougeng/ScientificFigureLibrary/main/docs/assets/sfl-gallery.png"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./.dsh-plugin/cordis.patch.yml"
+    },
+    "plugin": {
+      "displayName": "Scientific Figure Library",
+      "summary": {
+        "en": "Search and materialize reviewed scientific-figure templates via MCP and one core Skill.",
+        "zh-CN": "通过 MCP 和一个核心 Skill 检索并物化已审阅的科学图模板。"
+      }
+    }
+  },
+  "files": [
+    ".wisp-plugin",
+    ".codex-plugin",
+    ".claude-plugin",
+    ".cursor-plugin",
+    ".pi-plugin",
+    ".dsh-plugin",
+    "assets",
+    "!assets/thumbs",
+    "!assets/personal-modules/previews",
+    "!assets/personal-modules/thumbs",
+    "docs/GLOBAL_LIBRARY_0.6.md",
+    "docs/PROTOCOL.md",
+    "dist",
+    "skills",
+    "LICENSE",
+    "README.md",
+    "README.zh-CN.md",
+    "THIRD_PARTY_NOTICES.md",
+    "docs/INSTALL_LOCAL.md"
+  ],
+  "scripts": {
+    "build": "tsc --noEmit && vite build && vite build --config vite.local.config.ts && node scripts/esbuild-server.mjs",
+    "catalog": "node scripts/build-catalog.mjs",
+    "package:source-pack": "node scripts/package-source-pack.mjs",
+    "package:npm": "node scripts/release-preflight.mjs && npm run build && node scripts/package-npm.mjs",
+    "package:wisp": "node scripts/release-preflight.mjs && npm run build && node scripts/package-wisp.mjs",
+    "start": "node dist/index.js",
+    "version:check": "node scripts/check-version-sync.mjs",
+    "version:set": "node scripts/version-set.mjs",
+    "test": "node scripts/check-version-sync.mjs && node scripts/test-isolated.mjs",
+    "test:smoke": "npm run build && node scripts/smoke.mjs",
+    "check": "npm run test && npm run test:smoke",
+    "package:codex": "node scripts/release-preflight.mjs && npm run build && node scripts/package-codex.mjs",
+    "package:claude": "node scripts/release-preflight.mjs && npm run build && node scripts/package-claude.mjs",
+    "package:cursor": "node scripts/release-preflight.mjs && npm run build && node scripts/package-cursor.mjs",
+    "package:plugins": "node scripts/package-plugins.mjs",
+    "community:sync": "node scripts/sync-community.mjs",
+    "docs:check-links": "node scripts/check-doc-links.mjs",
+    "modules:validate": "node scripts/validate-personal-modules.mjs",
+    "modules:archive": "node scripts/archive-personal-modules.mjs",
+    "modules:catalog": "node scripts/build-personal-module-catalog.mjs",
+    "modules:source-pack": "node scripts/package-personal-module-source-pack.mjs",
+    "modules:feed": "node scripts/publish-open-figure-feed.mjs",
+    "start:local": "node dist/index.js --local",
+    "package:windows": "npm run build && node scripts/package-local-client.mjs windows-x64",
+    "package:linux": "npm run build && node scripts/package-local-client.mjs linux-x64",
+    "package:linux:arm64": "npm run build && node scripts/package-local-client.mjs linux-arm64",
+    "package:macos": "npm run build && node scripts/package-local-client.mjs macos-native",
+    "package:macos:arm64": "npm run build && node scripts/package-local-client.mjs macos-arm64",
+    "package:macos:x64": "npm run build && node scripts/package-local-client.mjs macos-x64",
+    "package:windows:no-node": "npm run build && node scripts/package-local-client.mjs windows-x64 --system-node",
+    "package:linux:no-node": "npm run build && node scripts/package-local-client.mjs linux-x64 --system-node",
+    "package:linux:arm64:no-node": "npm run build && node scripts/package-local-client.mjs linux-arm64 --system-node",
+    "package:macos:no-node": "npm run build && node scripts/package-local-client.mjs macos-native --system-node",
+    "dev": "node scripts/dev.mjs"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/ext-apps": "^1.7.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@types/jsdom": "^21.1.7",
+    "@types/markdown-it": "^14.2.0",
+    "@types/node": "^22.19.5",
+    "@types/pngjs": "^6.0.5",
+    "esbuild": "^0.25.0",
+    "fflate": "^0.8.2",
+    "jsdom": "^26.1.0",
+    "typescript": "^5.9.3",
+    "vite": "^6.0.0",
+    "vite-plugin-singlefile": "^2.3.0",
+    "zod": "^4.1.13"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lhg-dsh-plugins/lhg-dsh-scientificfigurelibrary"
+  },
+  "dependencies": {
+    "dompurify": "^3.4.14",
+    "jpeg-js": "^0.4.4",
+    "markdown-it": "^14.3.1",
+    "pngjs": "^7.0.0",
+    "yaml": "^2.9.0"
+  },
+  "author": "xuzhougeng and jarxunlai"
+}

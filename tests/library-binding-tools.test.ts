@@ -1,0 +1,276 @@
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import {
+  registerLibraryBindingTools,
+  type CurrentLibraryContext,
+} from "../src/library-binding-tools.ts";
+import {
+  LibraryRuntime,
+  defaultLibraryLocatorPath,
+  readLibraryRootMarker,
+} from "../src/library-runtime.ts";
+import { VersionedTemplateLibrary } from "../src/versioned-library.ts";
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function isolateConfigHome(rootDir: string) {
+  const priorXdg = process.env.XDG_CONFIG_HOME;
+  const priorAppData = process.env.APPDATA;
+  const configHome = path.join(rootDir, "config");
+  if (process.platform === "win32") process.env.APPDATA = configHome;
+  else process.env.XDG_CONFIG_HOME = configHome;
+  return () => {
+    if (priorXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = priorXdg;
+    if (priorAppData === undefined) delete process.env.APPDATA;
+    else process.env.APPDATA = priorAppData;
+  };
+}
+
+function record(value: unknown): Record<string, unknown> {
+  assert.ok(value && typeof value === "object" && !Array.isArray(value));
+  return value as Record<string, unknown>;
+}
+
+function text(value: unknown) {
+  const content = record(value).content;
+  assert.ok(Array.isArray(content));
+  return content
+    .map((item) => {
+      const block = record(item);
+      return block.type === "text" && typeof block.text === "string" ? block.text : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+test("text-only hosts can bind the global Library using cached planDigest", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "sfl-binding-tools-"));
+  const restoreConfigHome = isolateConfigHome(root);
+  const priorOverride = process.env.FIGURE_LIBRARY_DIR;
+  delete process.env.FIGURE_LIBRARY_DIR;
+  const libraryDirectory = path.join(root, "portable-library");
+  const runtime = new LibraryRuntime();
+  const contexts = new Map<string, CurrentLibraryContext>();
+  const currentLibraries = async () => {
+    const snapshot = await runtime.current();
+    const existing = contexts.get(snapshot.contextKey);
+    if (existing) return existing;
+    const context = {
+      snapshot,
+      versionedLibrary: new VersionedTemplateLibrary(snapshot),
+    };
+    contexts.set(snapshot.contextKey, context);
+    return context;
+  };
+  const server = new McpServer({ name: "Binding tools test", version: "0.5.0" });
+  registerLibraryBindingTools({ server, runtime, currentLibraries });
+  const client = new Client({ name: "binding-tools-test", version: "0.5.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    const missing = await client.callTool({
+      name: "figure_library_apply_bind_global",
+      arguments: {
+        planDigest: "f".repeat(64),
+        operationId: "missing-binding-plan",
+      },
+    });
+    const missingEnvelope = record(record(missing.structuredContent).envelope);
+    assert.equal(missingEnvelope.outcome, "blocked");
+    assert.equal(missingEnvelope.code, "plan_not_available");
+    assert.equal(missingEnvelope.retrySameCall, false);
+
+    const planned = await client.callTool({
+      name: "figure_library_plan_bind_global",
+      arguments: { libraryDirectory, migrationMode: "none" },
+    });
+    const structured = record(planned.structuredContent);
+    const envelope = record(structured.envelope);
+    const plan = record(structured.plan);
+    const planDigest = String(plan.planDigest);
+    assert.equal(envelope.outcome, "needs_user_confirmation");
+    assert.match(text(planned), new RegExp(`PLAN_DIGEST: ${planDigest}`, "u"));
+    assert.match(text(planned), new RegExp(`LIBRARY_DIRECTORY: ${escapeRegExp(libraryDirectory)}`, "u"));
+    assert.match(
+      text(planned),
+      new RegExp(`LOCATOR_PATH: ${String(plan.locatorPath).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`, "u"),
+    );
+    assert.match(text(planned), /MIGRATION_MODE: none/u);
+
+    const applyArguments = {
+      planDigest,
+      operationId: "bind-text-only-library",
+    };
+    const applied = await client.callTool({
+      name: "figure_library_apply_bind_global",
+      arguments: applyArguments,
+    });
+    assert.equal(record(record(applied.structuredContent).envelope).outcome, "applied");
+    const marker = await readLibraryRootMarker(libraryDirectory);
+    assert.equal(marker?.value.libraryId, plan.libraryId);
+    assert.equal(
+      defaultLibraryLocatorPath(),
+      plan.locatorPath,
+    );
+
+    const replayed = await client.callTool({
+      name: "figure_library_apply_bind_global",
+      arguments: applyArguments,
+    });
+    assert.equal(record(record(replayed.structuredContent).envelope).outcome, "replayed");
+  } finally {
+    await client.close();
+    await server.close();
+    restoreConfigHome();
+    if (priorOverride === undefined) delete process.env.FIGURE_LIBRARY_DIR;
+    else process.env.FIGURE_LIBRARY_DIR = priorOverride;
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("text-only hosts can explicitly recover a malformed locator without implicit fallback", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "sfl-binding-broken-locator-"));
+  const restoreConfigHome = isolateConfigHome(root);
+  const priorOverride = process.env.FIGURE_LIBRARY_DIR;
+  delete process.env.FIGURE_LIBRARY_DIR;
+  const locatorPath = defaultLibraryLocatorPath();
+  const libraryDirectory = path.join(root, "selected-library");
+  const overrideDirectory = path.join(root, "environment-override");
+  await fs.mkdir(path.dirname(locatorPath), { recursive: true });
+  await fs.writeFile(locatorPath, "{broken-locator\n");
+  const runtime = new LibraryRuntime();
+  const currentLibraries = async () => {
+    const snapshot = await runtime.current();
+    return { snapshot, versionedLibrary: new VersionedTemplateLibrary(snapshot) };
+  };
+  const server = new McpServer({ name: "Broken locator binding test", version: "0.6.0" });
+  registerLibraryBindingTools({ server, runtime, currentLibraries });
+  const client = new Client({ name: "broken-locator-binding-test", version: "0.6.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    await assert.rejects(runtime.current());
+
+    const planned = await client.callTool({
+      name: "figure_library_plan_bind_global",
+      arguments: { libraryDirectory, migrationMode: "none" },
+    });
+    const structured = record(planned.structuredContent);
+    const plan = record(structured.plan);
+    assert.equal(record(structured.envelope).outcome, "needs_user_confirmation");
+    assert.equal(plan.expectedLocatorStatus, "malformed_json");
+    assert.match(String(plan.expectedLocatorRawDigest), /^[a-f0-9]{64}$/u);
+    assert.equal(plan.expectedConfigRevision, null);
+    assert.equal(plan.configRevision, 1);
+    assert.match(text(planned), /LOCATOR_STATUS: malformed_json/u);
+    assert.equal(await fs.readFile(locatorPath, "utf8"), "{broken-locator\n");
+
+    process.env.FIGURE_LIBRARY_DIR = overrideDirectory;
+    const blocked = await client.callTool({
+      name: "figure_library_apply_bind_global",
+      arguments: {
+        planDigest: String(plan.planDigest),
+        operationId: "blocked-by-new-environment-override",
+      },
+    });
+    assert.equal(record(record(blocked.structuredContent).envelope).outcome, "blocked");
+    assert.equal(await fs.readFile(locatorPath, "utf8"), "{broken-locator\n");
+
+    delete process.env.FIGURE_LIBRARY_DIR;
+    const applyArguments = {
+      planDigest: String(plan.planDigest),
+      operationId: "recover-malformed-locator",
+    };
+    const applied = await client.callTool({
+      name: "figure_library_apply_bind_global",
+      arguments: applyArguments,
+    });
+    assert.equal(record(record(applied.structuredContent).envelope).outcome, "applied");
+    assert.equal((await runtime.current()).root, path.resolve(libraryDirectory));
+
+    const replayed = await client.callTool({
+      name: "figure_library_apply_bind_global",
+      arguments: applyArguments,
+    });
+    assert.equal(record(record(replayed.structuredContent).envelope).outcome, "replayed");
+  } finally {
+    await client.close();
+    await server.close();
+    restoreConfigHome();
+    if (priorOverride === undefined) delete process.env.FIGURE_LIBRARY_DIR;
+    else process.env.FIGURE_LIBRARY_DIR = priorOverride;
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+
+test("text-only hosts can bind a Local workspace using cached planDigest", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "sfl-workspace-bind-tools-"));
+  const restoreConfigHome = isolateConfigHome(root);
+  const priorOverride = process.env.FIGURE_WORKSPACE_DIR;
+  delete process.env.FIGURE_WORKSPACE_DIR;
+  const workspaceDirectory = path.join(root, "local-workspace");
+  const runtime = new LibraryRuntime();
+  const { WorkspaceRuntime } = await import("../src/workspace-runtime.ts");
+  const workspaceRuntime = new WorkspaceRuntime();
+  const contexts = new Map<string, CurrentLibraryContext>();
+  const currentLibraries = async () => {
+    const snapshot = await runtime.current();
+    const existing = contexts.get(snapshot.contextKey);
+    if (existing) return existing;
+    const context = {
+      snapshot,
+      versionedLibrary: new VersionedTemplateLibrary(snapshot),
+    };
+    contexts.set(snapshot.contextKey, context);
+    return context;
+  };
+  const server = new McpServer({ name: "Workspace bind test", version: "0.5.4" });
+  registerLibraryBindingTools({ server, runtime, workspaceRuntime, currentLibraries });
+  const client = new Client({ name: "workspace-bind-test", version: "0.5.4" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    const relative = await client.callTool({
+      name: "figure_library_plan_bind_workspace",
+      arguments: { workspaceDirectory: "relative-workspace" },
+    });
+    assert.equal(record(record(relative.structuredContent).envelope).code, "absolute_workspace_directory_required");
+
+    const planned = await client.callTool({
+      name: "figure_library_plan_bind_workspace",
+      arguments: { workspaceDirectory },
+    });
+    const plan = record(record(planned.structuredContent).plan);
+    const planDigest = String(plan.planDigest);
+    assert.equal(record(record(planned.structuredContent).envelope).outcome, "needs_user_confirmation");
+    const applied = await client.callTool({
+      name: "figure_library_apply_bind_workspace",
+      arguments: { planDigest, operationId: "workspace-bind-1" },
+    });
+    assert.equal(record(record(applied.structuredContent).envelope).outcome, "applied");
+    const snapshot = await workspaceRuntime.current();
+    assert.equal(snapshot.confirmed, true);
+    assert.equal(snapshot.directory, workspaceDirectory);
+    await fs.stat(path.join(workspaceDirectory, "drafts"));
+    await fs.stat(path.join(workspaceDirectory, "gallery"));
+  } finally {
+    await client.close();
+    await server.close();
+    restoreConfigHome();
+    if (priorOverride === undefined) delete process.env.FIGURE_WORKSPACE_DIR;
+    else process.env.FIGURE_WORKSPACE_DIR = priorOverride;
+  }
+});

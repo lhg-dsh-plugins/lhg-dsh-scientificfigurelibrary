@@ -1,0 +1,1209 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import test from "node:test";
+import { createTestWindow } from "./helpers/dom.ts";
+import {
+  buildHeadlessReviewHandoff,
+  buildPlotTaskHandoff,
+  buildPlotSetHandoff,
+  updateModelContextForHeadlessReview,
+} from "../app/handoff.ts";
+import {
+  announceSelectionChange,
+  mountExactPreviewImage,
+  openCandidateDetail,
+  parseSearchResult,
+  renderCandidateCards,
+  renderPlotSetBar,
+  type Candidate,
+  type SearchResult,
+} from "../app/view.ts";
+import { VERSION } from "../src/version.ts";
+import { createIcon, setButtonContent } from "../app/icons.ts";
+import { mountPlottingTips } from "../app/plotting-tips.ts";
+
+function candidate(
+  providerId: string,
+  templateId: string,
+  previewStatus: Candidate["previewStatus"],
+  previewDataUrl?: string,
+): Candidate {
+  return {
+    candidateId: `candidate-${templateId}`,
+    templateId,
+    providerId,
+    exactSelector: {
+      schema: "figure-library.provider-selector.v1",
+      providerId,
+      kind:
+        providerId === "org.scientificfigurelibrary.local"
+          ? "local-published.v1"
+          : "figureya-module.v1",
+      identity: { templateId },
+    },
+    sourceLabel:
+      providerId === "org.scientificfigurelibrary.local" ? "Local Published" : "FigureYa",
+    title: `${templateId} title`,
+    retrievalScore: 100,
+    reasons: ["bar chart match", "group comparison"],
+    warnings: ["not executed"],
+    excerpt: "short excerpt",
+    description:
+      "A complete candidate description that must remain visible in the detail dialog without line clamping.",
+    application: "Grouped bar-chart comparisons",
+    dataProfile: "One category and one numeric value",
+    inputFiles: ["data.csv"],
+    codeFiles: ["plot.R"],
+    packages: ["ggplot2"],
+    materializable: true,
+    previewAvailable: previewStatus === "ready",
+    previewStatus,
+    ...(previewDataUrl
+      ? {
+          previewDataUrl,
+          previewMimeType: "image/png" as const,
+          previewByteLength: 68,
+          previewSha256: "a".repeat(64),
+        }
+      : {}),
+    assetKind: "plot_template",
+    language: "R",
+    plotFamily: "bar",
+    reviewStatus: providerId.includes("local") ? "approved" : "not_reviewed",
+    codeStatus: "provided",
+    executionStatus: "not_run",
+    validationState: {
+      schema: "figure-library.validation-state.v1",
+      plotExecution: { status: "not_run", scope: "unknown" },
+      upstreamWorkflow: { status: "not_run" },
+      scientificValidation: { status: "not_assessed" },
+    },
+    canonicalPreviewDecision: {
+      assetPath: "visuals/source/preview.png",
+      reason: "default_uploaded_source",
+      selectedBy: "policy",
+    },
+    management: {
+      templateId,
+      canArchive: false,
+      canUpdate: false,
+    },
+  };
+}
+
+function searchResult(candidates: Candidate[]): SearchResult {
+  return {
+    query: "柱状图 bar chart",
+    libraryVersion: VERSION,
+    materializationProtocolVersion: 2,
+    intentFamilies: ["bar"],
+    reviewRequired: true,
+    resultSetId: "result-set",
+    correlationId: "search-correlation",
+    pagination: {
+      total: candidates.length,
+      pageIndex: 1,
+      pageSize: 6,
+      hasMore: false,
+      nextCursor: null,
+    },
+    candidates,
+  };
+}
+
+test("UI icons use accessible inline SVG and preserve visible button labels", () => {
+  const window = createTestWindow();
+  const document = window.document as unknown as Document;
+  const icon = createIcon(document, "details");
+  assert.equal(icon.getAttribute("viewBox"), "0 0 24 24");
+  assert.equal(icon.getAttribute("aria-hidden"), "true");
+  assert.equal(icon.getAttribute("focusable"), "false");
+  assert.equal(icon.querySelector("script"), null);
+  assert.equal(icon.querySelector("image"), null);
+
+  const primary = document.createElement("button");
+  setButtonContent(primary, "send", "确认并交给 Agent");
+  assert.equal(primary.textContent, "确认并交给 Agent");
+  assert.ok(primary.querySelector("svg.sfl-icon"));
+  assert.equal(primary.querySelector(".button-label")?.textContent, "确认并交给 Agent");
+
+  const compact = document.createElement("button");
+  setButtonContent(compact, "close", "关闭详情", { iconOnly: true });
+  assert.equal(compact.getAttribute("aria-label"), "关闭详情");
+  assert.equal(compact.title, "关闭详情");
+  assert.equal(compact.querySelector(".visually-hidden")?.textContent, "关闭详情");
+});
+
+test("App shell includes the shared brand, responsive UI, dark mode, and reduced motion", () => {
+  const root = path.resolve(import.meta.dirname, "..");
+  const html = fs.readFileSync(path.join(root, "app", "mcp-app.html"), "utf8");
+  const source = fs.readFileSync(path.join(root, "app", "main.ts"), "utf8");
+  const styles = fs.readFileSync(path.join(root, "app", "styles.css"), "utf8");
+  assert.match(html, /id="brand-logo"/u);
+  assert.match(source, /SFL_BRAND_ICON_DATA_URI/u);
+  assert.match(styles, /prefers-reduced-motion/u);
+  assert.match(styles, /html\[data-theme="dark"\]/u);
+  assert.match(styles, /@media \(max-width: 420px\)/u);
+  assert.match(styles, /\.card-context-text\s*\{[\s\S]*?-webkit-line-clamp:\s*4;/u);
+  const moduleTitleEn = styles.match(/\.module-title-en\s*\{([\s\S]*?)\}/u)?.[1] ?? "";
+  assert.match(moduleTitleEn, /overflow-wrap:\s*anywhere/u);
+  assert.match(moduleTitleEn, /word-break:\s*break-word/u);
+  assert.doesNotMatch(moduleTitleEn, /text-overflow:\s*ellipsis|white-space:\s*nowrap|overflow:\s*hidden/u);
+  assert.doesNotMatch(`${html}\n${source}\n${styles}`, /unpkg|jsdelivr|cdnjs/u);
+});
+
+test("plotting tips start collapsed and preserve an explicit open preference", () => {
+  const window = createTestWindow();
+  const document = window.document as unknown as Document;
+  const parent = document.createElement("section");
+  const storage = new Map<string, string>();
+  const store: Storage = {
+    get length() { return storage.size; },
+    clear() { storage.clear(); },
+    getItem(key) { return storage.get(key) ?? null; },
+    key(index) { return Array.from(storage.keys())[index] ?? null; },
+    removeItem(key) { storage.delete(key); },
+    setItem(key, value) { storage.set(key, value); },
+  };
+
+  const first = mountPlottingTips(document, parent, { storage: store, copy: async () => {} });
+  assert.equal(first.open, false);
+  first.open = true;
+  first.dispatchEvent(new window.Event("toggle"));
+
+  const reopened = mountPlottingTips(document, parent, { storage: store, copy: async () => {} });
+  assert.equal(reopened.open, true);
+  window.close();
+});
+
+test("search result hydrates App thumbnails from component-only metadata", () => {
+  const rawCandidate = candidate(
+    "org.figureya.module",
+    "figureya-bar",
+    "ready",
+    undefined,
+  );
+  const structured = searchResult([rawCandidate]);
+  const dataUrl = "data:image/png;base64,iVBORw0KGgo=";
+  assert.doesNotMatch(JSON.stringify(structured), /data:image\//u);
+  const parsed = parseSearchResult(structured, {
+    candidatePreviews: {
+      [rawCandidate.candidateId]: {
+        previewDataUrl: dataUrl,
+        previewMimeType: "image/png",
+        previewByteLength: 68,
+        previewSha256: "a".repeat(64),
+      },
+    },
+  });
+  assert.equal(parsed?.candidates[0]?.previewDataUrl, dataUrl);
+});
+
+test("personal module cards keep publisher state, Local state, and thumbnail status separate", () => {
+  const window = createTestWindow();
+  const document = window.document as unknown as Document;
+  const cards = document.createElement("section");
+  const empty = document.createElement("section");
+  const personal = candidate(
+    "io.github.jarxunlai.personal-figures",
+    "personal-module-fixture",
+    "ready",
+    "data:image/png;base64,fixture",
+  );
+  personal.searchPreviewAvailable = true;
+  personal.searchPreviewStatus = "ready";
+  personal.previewStatus = undefined;
+  personal.sourceLabel = "Open Figure Modules";
+  personal.titleEn = "Personal module fixture English title";
+  personal.upstreamStatus = "published";
+  personal.publisherReviewStatus = "approved";
+  personal.publisherExecutionStatus = "passed";
+  personal.publisherExecutionScope = "synthetic_data";
+  personal.codeExecutedBySflClient = false;
+  personal.exactSelector = {
+    ...personal.exactSelector,
+    kind: "module-archive.v1",
+    identity: {
+      moduleId: personal.templateId,
+      sourceCommit: "a".repeat(40),
+      archiveCommit: "b".repeat(40),
+      archive: { digest: "c".repeat(64) },
+      mode: "template",
+    },
+  };
+  renderCandidateCards({
+    document,
+    cards,
+    empty,
+    result: searchResult([personal]),
+    onDetail() {},
+  });
+  assert.match(cards.textContent ?? "", /Open Figure Modules/u);
+  assert.match(cards.textContent ?? "", /Personal module fixture English title/u);
+  assert.equal(cards.querySelectorAll(".module-title-en").length, 1);
+  assert.match(cards.textContent ?? "", /匹配度 100/u);
+  assert.equal(cards.querySelector(".template-id"), null);
+  assert.equal(cards.querySelector(".provider-state"), null);
+  assert.equal(cards.querySelector(".validation-summary"), null);
+  assert.doesNotMatch(cards.textContent ?? "", /发布者审核状态：approved/u);
+  assert.doesNotMatch(cards.textContent ?? "", /SFL Local review：not_reviewed/u);
+
+  const opener = document.createElement("button");
+  document.body.append(opener);
+  const detail = openCandidateDetail({
+    document,
+    candidate: personal,
+    opener,
+    serverToolsAvailable: true,
+    updateModelContextAvailable: true,
+    onRequestExactPreview() {},
+    onRequestAgentReview() {},
+  });
+  assert.match(detail.dialog.textContent ?? "", /源码 commit：aaaaaaaa/u);
+  assert.match(detail.dialog.textContent ?? "", /Personal module fixture English title/u);
+  assert.equal(detail.dialog.querySelectorAll(".detail-title-en").length, 1);
+  assert.match(detail.dialog.textContent ?? "", /归档 commit：bbbbbbbb/u);
+  assert.match(detail.dialog.textContent ?? "", /ZIP SHA-256：cccccccc/u);
+  assert.match(detail.dialog.textContent ?? "", /发布者审核状态：approved/u);
+  assert.match(detail.dialog.textContent ?? "", /发布者执行状态：passed（synthetic_data）/u);
+  assert.match(detail.dialog.textContent ?? "", /SFL Local review：not_reviewed/u);
+  assert.match(detail.dialog.textContent ?? "", /SFL code execution：false/u);
+  assert.equal(detail.dialog.querySelector<HTMLElement>(".detail-technical-panel")?.hidden, true);
+  assert.equal(detail.exactPreviewButton.disabled, false);
+  assert.ok(detail.exactPreviewButton.querySelector("svg.sfl-icon"));
+  assert.ok(detail.confirmButton.querySelector("svg.sfl-icon"));
+  assert.equal(detail.closeButton.getAttribute("aria-label"), `关闭 ${personal.title} 详情`);
+  assert.equal(detail.closeButton.title, `关闭 ${personal.title} 详情`);
+  detail.closeButton.click();
+});
+
+test("thumbnail and explicit action open candidate details while the title toggles selection", () => {
+  const window = createTestWindow();
+  const document = window.document as unknown as Document;
+  const cards = document.createElement("section");
+  const empty = document.createElement("section");
+  const dataUrl = "data:image/png;base64,iVBORw0KGgo=";
+  const result = searchResult([
+    candidate("org.scientificfigurelibrary.local", "local-bar", "ready", dataUrl),
+    candidate("org.figureya.module", "figureya-bar", "ready", dataUrl),
+  ]);
+  const opened: Array<{ templateId: string; openerClass: string }> = [];
+  const toggles: Array<{ templateId: string; selected: boolean }> = [];
+  renderCandidateCards({
+    document,
+    cards,
+    empty,
+    result,
+    onToggleSelect(value, selected) {
+      toggles.push({ templateId: value.templateId, selected });
+    },
+    onDetail(value, _elements, opener) {
+      opened.push({ templateId: value.templateId, openerClass: opener.className });
+    },
+  });
+
+  const images = Array.from(cards.querySelectorAll("img"));
+  assert.equal(images.length, 2);
+  assert.ok(images.every((image) => image.src === dataUrl));
+  assert.ok(images.every((image) => image.loading === "lazy"));
+  assert.equal(cards.querySelectorAll(".candidate-action .sfl-icon").length, 2);
+  assert.equal(cards.querySelectorAll(".preview-open-indicator .sfl-icon").length, 2);
+  assert.deepEqual(
+    Array.from(cards.querySelectorAll(".source")).map((node) => node.textContent),
+    ["Local Published", "FigureYa"],
+  );
+  assert.equal(cards.querySelectorAll(".card-context").length, 2);
+  assert.ok(
+    Array.from(cards.querySelectorAll(".card-context-text")).every((node) =>
+      node.textContent?.includes("Grouped bar-chart comparisons") === true,
+    ),
+  );
+  assert.deepEqual(
+    Array.from(cards.querySelectorAll(".card-context-label")).map((node) => node.textContent),
+    ["应用场景", "应用场景"],
+  );
+  assert.deepEqual(
+    Array.from(cards.querySelectorAll(".score")).map((node) => node.textContent),
+    ["匹配度 100", "匹配度 100"],
+  );
+  assert.ok(
+    Array.from(cards.querySelectorAll(".score")).every(
+      (node) => node.getAttribute("aria-label")?.includes("仅表示检索相关性") === true,
+    ),
+  );
+  assert.equal(cards.querySelectorAll(".provider-state").length, 0);
+  assert.equal(cards.querySelectorAll(".validation-summary").length, 0);
+  assert.equal(cards.querySelectorAll(".template-id").length, 0);
+  assert.equal(cards.querySelectorAll(".card-status").length, 0);
+  (cards.querySelectorAll(".preview-button")[0] as HTMLButtonElement).click();
+  (cards.querySelectorAll(".candidate-action")[1] as HTMLButtonElement).click();
+  assert.deepEqual(opened, [
+    { templateId: "local-bar", openerClass: "preview preview-button" },
+    { templateId: "figureya-bar", openerClass: "candidate-action" },
+  ]);
+  (cards.querySelectorAll(".candidate-title")[1] as HTMLButtonElement).click();
+  assert.deepEqual(toggles, [{ templateId: "figureya-bar", selected: true }]);
+  assert.equal(opened.length, 2);
+  assert.equal(empty.hidden, true);
+});
+
+test("selection is visible on the card and title or blank-area clicks toggle it", () => {
+  const window = createTestWindow();
+  const document = window.document as unknown as Document;
+  const cards = document.createElement("section");
+  const empty = document.createElement("section");
+  const result = searchResult([
+    candidate("org.scientificfigurelibrary.local", "select-a", "ready"),
+    candidate("org.figureya.module", "select-b", "ready"),
+  ]);
+  const toggles: Array<{ templateId: string; selected: boolean }> = [];
+  let detailsOpened = 0;
+  renderCandidateCards({
+    document,
+    cards,
+    empty,
+    result,
+    selectedIds: new Set(["candidate-select-a"]),
+    onToggleSelect(value, selected) {
+      toggles.push({ templateId: value.templateId, selected });
+    },
+    onDetail() {
+      detailsOpened += 1;
+    },
+  });
+
+  const first = cards.querySelectorAll(".card")[0] as HTMLElement;
+  assert.equal(first.dataset.selected, "true");
+  assert.equal(
+    (first.querySelector(".candidate-select-input") as HTMLInputElement).checked,
+    true,
+  );
+  assert.equal(
+    (first.querySelector(".candidate-title") as HTMLButtonElement).getAttribute("aria-pressed"),
+    "true",
+  );
+  assert.match(first.querySelector(".select-badge")?.textContent ?? "", /已选/u);
+
+  const second = cards.querySelectorAll(".card")[1] as HTMLElement;
+  assert.equal(second.dataset.selected, "false");
+  (second.querySelector(".card-context") as HTMLElement).click();
+  assert.deepEqual(toggles, [{ templateId: "select-b", selected: true }]);
+  assert.equal(second.dataset.selected, "true");
+  assert.equal(
+    (second.querySelector(".candidate-select-input") as HTMLInputElement).checked,
+    true,
+  );
+  (second.querySelector(".candidate-title") as HTMLButtonElement).click();
+  assert.deepEqual(toggles[1], { templateId: "select-b", selected: false });
+  assert.equal(second.dataset.selected, "false");
+  assert.equal(
+    (second.querySelector(".candidate-select-input") as HTMLInputElement).checked,
+    false,
+  );
+
+  (second.querySelector(".candidate-action") as HTMLButtonElement).click();
+  (second.querySelector(".preview-button") as HTMLButtonElement).click();
+  assert.equal(detailsOpened, 2);
+  assert.equal(toggles.length, 2);
+});
+
+test("selection changes announce a toast and bump the sticky selection count", () => {
+  const window = createTestWindow();
+  const document = window.document as unknown as Document;
+  const region = document.createElement("div");
+  const toast = announceSelectionChange({
+    document,
+    region,
+    message: "已选择「Foo 图」，共 1 项",
+  });
+  assert.equal(region.querySelector(".selection-toast"), toast);
+  assert.equal(toast.textContent, "已选择「Foo 图」，共 1 项");
+
+  const bar = document.createElement("section");
+  const submit = document.createElement("button");
+  const countLabel = document.createElement("span");
+  renderPlotSetBar({
+    bar,
+    submit,
+    countLabel,
+    selectedCount: 1,
+    canSubmit: true,
+    animateCount: true,
+  });
+  assert.equal(countLabel.textContent, "已选 1 个模板");
+  assert.ok(countLabel.classList.contains("count-bump"));
+  assert.equal(bar.dataset.selected, "true");
+  assert.equal(submit.disabled, false);
+  renderPlotSetBar({ bar, submit, countLabel, selectedCount: 0, canSubmit: true });
+  assert.equal(countLabel.classList.contains("count-bump"), false);
+  assert.equal(bar.dataset.selected, "false");
+  assert.equal(submit.disabled, true);
+});
+
+test("basic detail remains available without serverTools and exposes complete metadata", async () => {
+  const window = createTestWindow();
+  const document = window.document as unknown as Document;
+  const opener = document.createElement("button");
+  document.body.append(opener);
+  opener.focus();
+  const selected = candidate(
+    "org.scientificfigurelibrary.local",
+    "local-detail",
+    "ready",
+    "data:image/png;base64,iVBORw0KGgo=",
+  );
+  let exactCalls = 0;
+  let closed = 0;
+  const detail = openCandidateDetail({
+    document,
+    candidate: selected,
+    opener,
+    serverToolsAvailable: false,
+    updateModelContextAvailable: false,
+    onClosed() {
+      closed += 1;
+    },
+    onRequestExactPreview() {
+      exactCalls += 1;
+    },
+    onRequestAgentReview() {
+      assert.fail("updateModelContext fallback is unavailable");
+    },
+  });
+  await Promise.resolve();
+
+  assert.equal(detail.dialog.open, true);
+  assert.equal(detail.dialog.querySelector(".detail-description")?.textContent?.trim(), selected.description);
+  assert.match(detail.dialog.textContent ?? "", /Grouped bar-chart comparisons/u);
+  assert.match(detail.dialog.textContent ?? "", /One category and one numeric value/u);
+  assert.match(detail.dialog.textContent ?? "", /bar chart match/u);
+  assert.match(detail.dialog.textContent ?? "", /not executed/u);
+  assert.match(detail.dialog.textContent ?? "", /绘图执行：not_run（范围：unknown）/u);
+  assert.match(detail.dialog.textContent ?? "", /上游流程：not_run/u);
+  assert.match(detail.dialog.textContent ?? "", /科学验证：not_assessed/u);
+  assert.match(detail.dialog.textContent ?? "", /default_uploaded_source/u);
+  assert.match(detail.dialog.textContent ?? "", /visuals\/source\/preview.png/u);
+  assert.equal(detail.exactPreviewButton.disabled, true);
+  assert.equal(detail.confirmButton.disabled, true);
+  assert.equal(detail.confirmButton.textContent, "Host 不支持选择交接");
+  assert.match(detail.status.textContent ?? "", /也未提供 updateModelContext/u);
+  detail.exactPreviewButton.click();
+  assert.equal(exactCalls, 0);
+
+  detail.dialog.dispatchEvent(
+    new window.KeyboardEvent("keydown", { key: "Escape" }) as unknown as Event,
+  );
+  assert.equal(closed, 1);
+  assert.equal(document.activeElement, opener);
+});
+
+test("legacy candidates without validationState render a conservative three-part projection", () => {
+  const window = createTestWindow();
+  const document = window.document as unknown as Document;
+  const opener = document.createElement("button");
+  document.body.append(opener);
+  const legacy = candidate(
+    "org.scientificfigurelibrary.local",
+    "legacy-state",
+    "ready",
+    "data:image/png;base64,iVBORw0KGgo=",
+  );
+  legacy.executionStatus = "passed";
+  delete legacy.validationState;
+  delete legacy.canonicalPreviewDecision;
+
+  const detail = openCandidateDetail({
+    document,
+    candidate: legacy,
+    opener,
+    serverToolsAvailable: true,
+    updateModelContextAvailable: true,
+    onRequestExactPreview() {},
+    onRequestAgentReview() {
+      assert.fail("serverTools path must not use the headless handoff button");
+    },
+  });
+
+  const text = detail.dialog.textContent ?? "";
+  assert.match(text, /绘图执行：passed（范围：unknown）/u);
+  assert.match(text, /上游流程：unknown/u);
+  assert.match(text, /科学验证：not_assessed/u);
+  assert.doesNotMatch(text, /Canonical 预览/u);
+  detail.closeButton.click();
+});
+
+test("unavailable previews still open details but keep exact preview and confirmation disabled", () => {
+  const window = createTestWindow();
+  const document = window.document as unknown as Document;
+  const cards = document.createElement("section");
+  const empty = document.createElement("section");
+  const statuses: Candidate["previewStatus"][] = [
+    "missing",
+    "unreadable",
+    "unsupported",
+    "too_large",
+  ];
+  const opened: Candidate[] = [];
+  renderCandidateCards({
+    document,
+    cards,
+    empty,
+    result: searchResult(
+      statuses.map((status, index) =>
+        candidate("org.scientificfigurelibrary.local", `blocked-${index}`, status),
+      ),
+    ),
+    onDetail(value) {
+      opened.push(value);
+    },
+  });
+  assert.equal(cards.querySelectorAll("img").length, 0);
+  assert.ok(
+    Array.from(cards.querySelectorAll(".candidate-action")).every(
+      (button) => !(button as HTMLButtonElement).disabled,
+    ),
+  );
+  (cards.querySelector(".candidate-action") as HTMLButtonElement).click();
+  assert.equal(opened.length, 1);
+
+  const opener = document.createElement("button");
+  document.body.append(opener);
+  const detail = openCandidateDetail({
+    document,
+    candidate: opened[0]!,
+    opener,
+    serverToolsAvailable: true,
+    updateModelContextAvailable: true,
+    onRequestExactPreview() {
+      assert.fail("unavailable preview must not call exact preview");
+    },
+    onRequestAgentReview() {
+      assert.fail("serverTools path must not use the headless handoff button");
+    },
+  });
+  assert.equal(detail.exactPreviewButton.disabled, true);
+  assert.equal(detail.confirmButton.disabled, true);
+  detail.closeButton.click();
+});
+
+test("opening a usable detail does not request exact preview until the user clicks", () => {
+  const window = createTestWindow();
+  const document = window.document as unknown as Document;
+  const opener = document.createElement("button");
+  document.body.append(opener);
+  let exactCalls = 0;
+  const detail = openCandidateDetail({
+    document,
+    candidate: candidate(
+      "org.scientificfigurelibrary.local",
+      "manual-exact",
+      "ready",
+      "data:image/png;base64,iVBORw0KGgo=",
+    ),
+    opener,
+    serverToolsAvailable: true,
+    updateModelContextAvailable: true,
+    onRequestExactPreview() {
+      exactCalls += 1;
+    },
+    onRequestAgentReview() {
+      assert.fail("serverTools path must not use the headless handoff button");
+    },
+  });
+  assert.equal(exactCalls, 0);
+  assert.equal(detail.confirmButton.disabled, true);
+  detail.exactPreviewButton.click();
+  assert.equal(exactCalls, 1);
+  assert.equal(detail.confirmButton.disabled, true);
+  detail.closeButton.click();
+});
+
+test("updateModelContext fallback starts only after the user clicks one candidate", async () => {
+  const window = createTestWindow();
+  const document = window.document as unknown as Document;
+  const opener = document.createElement("button");
+  document.body.append(opener);
+  let exactCalls = 0;
+  let handoffCalls = 0;
+  let handoffPromise: Promise<string> | undefined;
+  const contextUpdates: Array<{ content: Array<{ type: "text"; text: string }> }> = [];
+  const selected = candidate(
+    "org.scientificfigurelibrary.local",
+    "context-handoff",
+    "ready",
+    "data:image/png;base64,iVBORw0KGgo=",
+  );
+  const detail = openCandidateDetail({
+    document,
+    candidate: selected,
+    opener,
+    serverToolsAvailable: false,
+    updateModelContextAvailable: true,
+    onRequestExactPreview() {
+      exactCalls += 1;
+    },
+    onRequestAgentReview() {
+      handoffCalls += 1;
+      handoffPromise = updateModelContextForHeadlessReview({
+        resultSetId: "context-result-set",
+        candidate: selected,
+        async updateModelContext(input) {
+          contextUpdates.push(input);
+        },
+      });
+    },
+  });
+  await Promise.resolve();
+
+  assert.equal(exactCalls, 0);
+  assert.equal(handoffCalls, 0);
+  assert.equal(contextUpdates.length, 0);
+  assert.equal(detail.exactPreviewButton.disabled, true);
+  assert.equal(detail.confirmButton.disabled, false);
+  assert.equal(detail.confirmButton.textContent, "选择并交给 Agent 审核");
+  assert.match(detail.status.textContent ?? "", /不能证明精确图片已在 App 内加载/u);
+
+  detail.confirmButton.click();
+  assert.equal(exactCalls, 0);
+  assert.equal(handoffCalls, 1);
+  assert.ok(handoffPromise);
+  await handoffPromise;
+  assert.equal(contextUpdates.length, 1);
+  assert.match(contextUpdates[0]?.content[0]?.text ?? "", /context-result-set/u);
+  assert.doesNotMatch(contextUpdates[0]?.content[0]?.text ?? "", /data:image/u);
+  detail.closeButton.click();
+  assert.equal(handoffCalls, 1);
+});
+
+test("headless review handoff contains one compact candidate and no image or credential values", () => {
+  const selected = candidate(
+    "org.scientificfigurelibrary.local",
+    "selected-only",
+    "ready",
+    "data:image/png;base64,private-thumbnail-bytes",
+  );
+  const text = buildHeadlessReviewHandoff({
+    resultSetId: "selected-result-set",
+    candidate: selected,
+  });
+  const selection = JSON.parse(text.split("\n")[3]!) as Record<string, unknown>;
+  const selectedCandidate = selection.selectedCandidate as Record<string, unknown>;
+  const authorization = selection.authorization as Record<string, unknown>;
+
+  assert.equal(selection.schema, "figure-library.app-selection-handoff.v1");
+  assert.equal(selection.handoffMode, "headless_exact_review");
+  assert.equal(selection.resultSetId, "selected-result-set");
+  assert.equal(selectedCandidate.templateId, "selected-only");
+  assert.equal(selectedCandidate.providerId, "org.scientificfigurelibrary.local");
+  assert.deepEqual(selectedCandidate.exactSelector, selected.exactSelector);
+  assert.equal(selectedCandidate.candidateThumbnailSha256, "a".repeat(64));
+  assert.equal(authorization.exactReviewCandidateLimit, 1);
+  assert.equal(authorization.mayCreateReadOnlyMaterializePlan, true);
+  assert.equal(authorization.mayApplyMaterialization, false);
+  assert.doesNotMatch(
+    JSON.stringify(selection),
+    /data:image|previewDataUrl|previewChallenge|previewReceipt/u,
+  );
+  assert.match(text, /figure_library_preview_exact_headless exactly once/u);
+  assert.match(text, /figure_library_confirm_selection_headless/u);
+  assert.match(text, /do not Apply or download anything/u);
+});
+
+test("exact preview load enables confirmation while image error keeps it disabled", () => {
+  const window = createTestWindow();
+  const document = window.document as unknown as Document;
+  const selected = candidate(
+    "org.scientificfigurelibrary.local",
+    "load-gated",
+    "ready",
+    "data:image/png;base64,iVBORw0KGgo=",
+  );
+  const createDetail = () => {
+    const opener = document.createElement("button");
+    document.body.append(opener);
+    return openCandidateDetail({
+      document,
+      candidate: selected,
+      opener,
+      serverToolsAvailable: true,
+      updateModelContextAvailable: true,
+      onRequestExactPreview() {},
+      onRequestAgentReview() {
+        assert.fail("serverTools path must not use the headless handoff button");
+      },
+    });
+  };
+
+  const loadedDetail = createDetail();
+  let loads = 0;
+  const loadedImage = mountExactPreviewImage({
+    document,
+    elements: loadedDetail,
+    dataUrl: "data:image/png;base64,exact-load",
+    alt: "exact load",
+    onLoaded() {
+      loads += 1;
+    },
+    onError() {
+      assert.fail("load scenario must not call error callback");
+    },
+  });
+  assert.equal(loadedDetail.confirmButton.disabled, true);
+  loadedImage.dispatchEvent(new window.Event("load") as unknown as Event);
+  assert.equal(loads, 1);
+  assert.equal(loadedDetail.confirmButton.disabled, false);
+  loadedDetail.closeButton.click();
+
+  const failedDetail = createDetail();
+  let errors = 0;
+  const failedImage = mountExactPreviewImage({
+    document,
+    elements: failedDetail,
+    dataUrl: "data:image/png;base64,exact-error",
+    alt: "exact error",
+    onLoaded() {
+      assert.fail("error scenario must not call load callback");
+    },
+    onError() {
+      errors += 1;
+    },
+  });
+  failedImage.dispatchEvent(new window.Event("error") as unknown as Event);
+  assert.equal(errors, 1);
+  assert.equal(failedDetail.confirmButton.disabled, true);
+  failedDetail.closeButton.click();
+});
+
+
+test("plot-set handoff includes every selected template and requires plotting all of them", () => {
+  const first = candidate("org.scientificfigurelibrary.local", "gsea-scatter", "ready");
+  const second = candidate("org.figureya.module", "enrichment-bar", "ready");
+  first.scientificQuestion = "哪些通路被激活或抑制？";
+  const text = buildPlotSetHandoff({
+    resultSetId: "plot-set-result",
+    candidates: [first, second],
+  });
+  const selection = JSON.parse(text.split("\n")[3]!) as Record<string, unknown>;
+  const selected = selection.taskItems as Array<Record<string, unknown>>;
+  const authorization = selection.authorization as Record<string, unknown>;
+  assert.equal(selection.schema, "figure-library.app-plot-task-handoff.v2");
+  assert.equal(selection.handoffMode, "agent_plot_task");
+  assert.equal(selected.length, 2);
+  assert.equal(selected[0]?.templateId, "gsea-scatter");
+  assert.equal(selected[0]?.scientificQuestion, "哪些通路被激活或抑制？");
+  assert.equal(selected[1]?.templateId, "enrichment-bar");
+  assert.equal((selected[0]?.materialState as Record<string, unknown>).sourcePack, "global-store");
+  assert.equal((selected[1]?.materialState as Record<string, unknown>).sourcePack, "global-figureya");
+  assert.equal(authorization.mustProcessAllSelected, true);
+  assert.match(text, /Process every taskItems entry/u);
+  assert.doesNotMatch(text, /Review only this one selected candidate/u);
+  assert.doesNotMatch(JSON.stringify(selection), /data:image|previewDataUrl/u);
+});
+
+test("confirmed single plot task uses the same v2 task shape and preserves its receipt", () => {
+  const selected = candidate("org.scientificfigurelibrary.local", "confirmed-template", "ready");
+  const text = buildPlotTaskHandoff({
+    resultSetId: "confirmed-result",
+    candidates: [selected],
+    preview: {
+      previewReceipt: "receipt-one",
+      confirmationMode: "app",
+      previewSha256: "a".repeat(64),
+    },
+  });
+  const selection = JSON.parse(text.split("\n")[3]!) as Record<string, unknown>;
+  const items = selection.taskItems as Array<Record<string, unknown>>;
+  const preview = items[0]?.previewState as Record<string, unknown>;
+  assert.equal(selection.schema, "figure-library.app-plot-task-handoff.v2");
+  assert.equal(items.length, 1);
+  assert.equal(items[0]?.templateId, "confirmed-template");
+  assert.equal(preview.previewReceipt, "receipt-one");
+  assert.equal(preview.appPreviewViewed, true);
+  assert.equal((items[0]?.materialState as Record<string, unknown>).status, "unknown");
+  assert.equal((items[0]?.materialState as Record<string, unknown>).sourcePack, "global-store");
+  assert.equal((items[0]?.executionState as Record<string, unknown>).status, "not_started");
+});
+
+test("all Providers render the same Markdown detail while technical metadata stays collapsed", () => {
+  for (const providerId of ["org.scientificfigurelibrary.local", "org.figureya.module", "io.github.jarxunlai.personal-figures"]) {
+    const document = createTestWindow().document as unknown as Document;
+    const selected = candidate(providerId, "markdown-detail", "missing");
+    selected.description = "Compare **immune composition** across conditions.";
+    selected.application = "### 免疫微环境\n\n- Compare treatment-associated cell fractions.\n- Prioritize follow-up.";
+    selected.dataProfile = "| Sample | Group |\n|---|---|\n| s1 | control |";
+    const opener = document.createElement("button");
+    document.body.append(opener);
+    const detail = openCandidateDetail({ document, candidate: selected, opener, serverToolsAvailable: false, updateModelContextAvailable: false, onRequestExactPreview() {}, onRequestAgentReview() {} });
+    assert.equal(detail.dialog.querySelectorAll(".detail-description").length, 1);
+    assert.equal(detail.dialog.querySelector(".detail-description strong")?.textContent, "immune composition");
+    assert.ok(detail.dialog.querySelector(".markdown-body h3"));
+    assert.ok(detail.dialog.querySelector(".markdown-body li"));
+    assert.ok(detail.dialog.querySelector(".markdown-table-scroll table"));
+    const technical = detail.dialog.querySelector<HTMLElement>(".detail-technical-panel")!;
+    assert.equal(technical.hidden, true);
+    assert.match(technical.textContent ?? "", /验证状态/u);
+    for (const label of ["输入文件", "代码文件", "依赖包", "数据特征"]) {
+      const heading = Array.from(detail.dialog.querySelectorAll("h3")).find((h) => h.textContent === label)!;
+      assert.ok(heading, label);
+      assert.equal(heading.closest("details"), null, label);
+    }
+    detail.closeButton.click();
+  }
+});
+
+test("candidate detail dialog locks background scroll while open", () => {
+  const document = createTestWindow().document as unknown as Document;
+  const opener = document.createElement("button");
+  document.body.append(opener);
+  const detail = openCandidateDetail({
+    document,
+    candidate: candidate("org.figureya.module", "scroll-lock", "missing"),
+    opener,
+    serverToolsAvailable: false,
+    updateModelContextAvailable: false,
+    onRequestExactPreview() {},
+    onRequestAgentReview() {},
+  });
+  assert.equal(document.documentElement.classList.contains("dialog-open"), true);
+  assert.equal(document.body.style.position, "fixed");
+  detail.dialog.close();
+  assert.equal(document.documentElement.classList.contains("dialog-open"), false);
+  assert.equal(document.body.style.position, "");
+});
+
+test("legacy scenarios render once and absent scenarios never use visualProfile", () => {
+  const document = createTestWindow().document as unknown as Document;
+  const selected = candidate("org.scientificfigurelibrary.local", "old", "missing");
+  selected.description = "Background\n\n## 适用场景\n\n- Legacy case";
+  selected.application = undefined;
+  selected.visualProfile = "Red points and a black axis";
+  const opener = document.createElement("button"); document.body.append(opener);
+  const show = () => openCandidateDetail({ document, candidate: selected, opener, serverToolsAvailable: false, updateModelContextAvailable: false, onRequestExactPreview() {}, onRequestAgentReview() {} });
+  let detail = show();
+  assert.equal((detail.dialog.textContent?.match(/Legacy case/gu) ?? []).length, 1);
+  assert.doesNotMatch(detail.dialog.textContent ?? "", /Red points/u);
+  detail.closeButton.click();
+  selected.description = "A description without scenarios.";
+  detail = show();
+  assert.match(detail.dialog.textContent ?? "", /未单独记录/u);
+  assert.doesNotMatch(detail.dialog.textContent ?? "", /Red points/u);
+  detail.closeButton.click();
+});
+
+test("selection toggles locally once and survives rerender; detail controls do not select", () => {
+  const window = createTestWindow();
+  const document = window.document as unknown as Document;
+  const cards = document.createElement("section");
+  const empty = document.createElement("section");
+  document.body.append(cards, empty);
+  const item = candidate("org.figureya.module", "selection", "ready", "data:image/png;base64,iVBORw0KGgo=");
+  const selected = new Set<string>();
+  const toggles: boolean[] = [];
+  let details = 0;
+  const render = () => renderCandidateCards({
+    document, cards, empty, result: searchResult([item]), selectedIds: selected,
+    onToggleSelect(value, checked) {
+      toggles.push(checked);
+      if (checked) selected.add(value.candidateId); else selected.delete(value.candidateId);
+    },
+    onDetail() { details++; },
+  });
+  const card = () => cards.querySelector(".card") as HTMLElement;
+  const title = () => cards.querySelector(".candidate-title") as HTMLButtonElement;
+  const checkbox = () => cards.querySelector(".candidate-select-input") as HTMLInputElement;
+  render();
+  title().click();
+  assert.deepEqual(toggles, [true]);
+  assert.equal(card().classList.contains("is-selected"), true);
+  assert.equal(title().getAttribute("aria-pressed"), "true");
+  assert.match(cards.querySelector(".candidate-select")!.textContent!, /已选/);
+  render();
+  assert.equal(checkbox().checked, true);
+  assert.equal(card().classList.contains("is-selected"), true);
+  assert.equal(title().getAttribute("aria-pressed"), "true");
+  (cards.querySelector(".preview-button") as HTMLButtonElement).click();
+  (cards.querySelector(".candidate-action") as HTMLButtonElement).click();
+  assert.equal(details, 2);
+  assert.deepEqual(toggles, [true]);
+  card().click();
+  assert.deepEqual(toggles, [true, false]);
+  assert.equal(checkbox().checked, false);
+  checkbox().click();
+  assert.deepEqual(toggles, [true, false, true]);
+  (cards.querySelector(".candidate-select") as HTMLLabelElement).click();
+  assert.deepEqual(toggles, [true, false, true, false]);
+  const link = document.createElement("a");
+  link.textContent = "source";
+  card().append(link);
+  link.click();
+  assert.deepEqual(toggles, [true, false, true, false]);
+  assert.equal(title().getAttribute("aria-pressed"), "false");
+});
+
+test("basic browsing no longer emits diagnostic calls and retains exact-preview diagnostics", () => {
+  const main = fs.readFileSync(path.join(import.meta.dirname, "../app/main.ts"), "utf8");
+  assert.doesNotMatch(main, /recordUiEvent\("(?:candidate\.(?:thumbnail_clicked|detail_opened|detail_closed)|host\.capabilities_detected)"/);
+  assert.match(main, /recordUiEvent\("exact_preview\.image_loaded"/);
+  assert.match(main, /recordUiEvent\("model_context\.updated"/);
+  const html = fs.readFileSync(path.join(import.meta.dirname, "../app/mcp-app.html"), "utf8");
+  assert.match(html, /id="plot-set-count"[^>]*aria-live="polite"/);
+  assert.doesNotMatch(html, /id="project-figures"/);
+  assert.doesNotMatch(main, /mountProjectFigures|figure_library_(?:resolve_style|.*submission)/);
+});
+
+test("merged selection keeps PR27 state semantics and PR26 visual hooks together", () => {
+  const window = createTestWindow();
+  const document = window.document as unknown as Document;
+  const cards = document.createElement("section");
+  const empty = document.createElement("section");
+  document.body.append(cards, empty);
+  const item = candidate("org.figureya.module", "merged-selection", "ready");
+  const transitions: boolean[] = [];
+  renderCandidateCards({ document, cards, empty, result: searchResult([item]), onDetail() {},
+    onToggleSelect(_candidate, selected) { transitions.push(selected); },
+  });
+  const card = cards.querySelector(".card") as HTMLElement;
+  const title = cards.querySelector(".candidate-title") as HTMLButtonElement;
+  title.click();
+  assert.equal(card.dataset.selected, "true");
+  assert.equal(card.classList.contains("is-selected"), true);
+  assert.match(card.querySelector(".candidate-select")!.textContent!, /已选/u);
+  assert.match(card.querySelector(".select-badge")!.textContent!, /已选/u);
+  for (const tag of ["button", "input", "a", "label", "summary", "select", "textarea"] as const) {
+    const control = document.createElement(tag);
+    card.append(control);
+    control.click();
+  }
+  assert.deepEqual(transitions, [true]);
+  title.click();
+  assert.equal(card.dataset.selected, "false");
+  assert.equal(card.classList.contains("is-selected"), false);
+  assert.equal(title.getAttribute("aria-pressed"), "false");
+  assert.deepEqual(transitions, [true, false]);
+  window.close();
+});
+
+test("cards show only actionable preview/materialization status", () => {
+  const window = createTestWindow();
+  const document = window.document as unknown as Document;
+  const cards = document.createElement("section");
+  const empty = document.createElement("section");
+  const unavailable = candidate("org.figureya.module", "missing-preview", "missing");
+  unavailable.previewAvailable = false;
+  const referenceOnly = candidate("org.figureya.module", "reference-only", "ready");
+  referenceOnly.materializable = false;
+  renderCandidateCards({
+    document,
+    cards,
+    empty,
+    result: searchResult([unavailable, referenceOnly]),
+    onDetail() {},
+  });
+
+  assert.deepEqual(
+    Array.from(cards.querySelectorAll(".card-status")).map((node) => node.textContent),
+    ["预览不可用", "仅参考图"],
+  );
+  assert.doesNotMatch(cards.textContent ?? "", /not_run|unknown|not_assessed|SFL execution/u);
+  window.close();
+});
+
+test("gallery cards can hide the extra select control and still toggle by card click", () => {
+  const window = createTestWindow();
+  const document = window.document as unknown as Document;
+  const cards = document.createElement("section");
+  const empty = document.createElement("section");
+  const item = candidate("org.figureya.module", "no-select-control", "ready");
+  const toggles: boolean[] = [];
+  renderCandidateCards({
+    document,
+    cards,
+    empty,
+    result: searchResult([item]),
+    showSelectionControl: false,
+    onToggleSelect(_candidate, selected) { toggles.push(selected); },
+    onDetail() {},
+  });
+  const card = cards.querySelector(".card") as HTMLElement;
+  assert.equal(card.querySelector(".candidate-select"), null);
+  (card.querySelector(".card-context") as HTMLElement).click();
+  assert.deepEqual(toggles, [true]);
+  assert.equal(card.dataset.selected, "true");
+  assert.match(card.querySelector(".select-badge")?.textContent ?? "", /已选/u);
+  window.close();
+});
+
+test("cards prefer a scientific question and fall back to the application scenario", () => {
+  const window = createTestWindow();
+  const document = window.document as unknown as Document;
+  const cards = document.createElement("section");
+  const empty = document.createElement("section");
+  const question = candidate("org.figureya.module", "question-first", "ready");
+  question.application = "Application should not replace the scientific question.";
+  question.scientificQuestion = "Which treatment changes the abundance of the target cell population?";
+  const application = candidate("org.figureya.module", "application-fallback", "ready");
+  application.application = "Compare treatment groups and summarize their distribution.";
+  delete application.scientificQuestion;
+  renderCandidateCards({
+    document,
+    cards,
+    empty,
+    result: searchResult([question, application]),
+    onDetail() {},
+  });
+
+  assert.deepEqual(
+    Array.from(cards.querySelectorAll(".card-context-label")).map((node) => node.textContent),
+    ["科学问题", "应用场景"],
+  );
+  assert.match(cards.querySelectorAll(".card-context-text")[0]?.textContent ?? "", /Which treatment changes/u);
+  assert.match(cards.querySelectorAll(".card-context-text")[1]?.textContent ?? "", /Compare treatment groups/u);
+  window.close();
+});
+
+test("plot-set feedback retains zero, eight, nine and missing-host submission gates", () => {
+  const window = createTestWindow();
+  const document = window.document as unknown as Document;
+  const bar = document.createElement("section");
+  const submit = document.createElement("button");
+  const countLabel = document.createElement("span");
+  for (const [selectedCount, canSubmit, disabled] of [[0, true, true], [8, true, false], [9, true, true], [1, false, true]] as const) {
+    renderPlotSetBar({ bar, submit, countLabel, selectedCount, canSubmit, animateCount: true });
+    assert.equal(submit.disabled, disabled);
+    assert.equal(countLabel.textContent, `已选 ${selectedCount} 个模板`);
+    assert.equal(bar.dataset.selected, String(selectedCount > 0));
+  }
+  window.close();
+});
+
+test("replaced toast timers cannot remove the latest selection announcement", async () => {
+  const window = createTestWindow();
+  const document = window.document as unknown as Document;
+  const region = document.createElement("div");
+  const first = announceSelectionChange({ document, region, message: "first", durationMs: 0 });
+  const current = announceSelectionChange({ document, region, message: "current", durationMs: 10000 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(first.parentNode, null);
+  assert.equal(region.firstChild, current);
+  const final = announceSelectionChange({ document, region, message: "final", durationMs: 0 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(final.parentNode, null);
+  assert.equal(region.childElementCount, 0);
+  window.close();
+});
+
+test("merged shell keeps accessible count, toast, plotting tips and hidden empty state", () => {
+  const root = path.resolve(import.meta.dirname, "..");
+  const html = fs.readFileSync(path.join(root, "app/mcp-app.html"), "utf8");
+  const main = fs.readFileSync(path.join(root, "app/main.ts"), "utf8");
+  const styles = fs.readFileSync(path.join(root, "app/styles.css"), "utf8");
+  assert.match(html, /id="plot-set-count"[^>]*class="plot-set-count"[^>]*aria-live="polite"/u);
+  assert.match(html, /id="toast-region"[^>]*aria-live="polite"/u);
+  assert.match(html, /id="plotting-help"/u);
+  assert.match(main, /mountPlottingTips\(/u);
+  assert.match(main, /announceSelectionChange\(/u);
+  assert.match(styles, /\.empty\[hidden\]\s*\{\s*display: none;/u);
+  assert.match(styles, /#app\[data-display-mode="pip"\] \.plotting-tips/u);
+});
+
+test("technical metadata opens beside the main detail instead of expanding inline", () => {
+  const document = createTestWindow().document as unknown as Document;
+  const opener = document.createElement("button");
+  document.body.append(opener);
+  const detail = openCandidateDetail({
+    document,
+    candidate: candidate("io.github.jarxunlai.personal-figures", "aside-tech", "ready", "data:image/png;base64,iVBORw0KGgo="),
+    opener,
+    serverToolsAvailable: true,
+    updateModelContextAvailable: false,
+    onRequestExactPreview() {},
+    onRequestAgentReview() {},
+  });
+  const panel = detail.dialog.querySelector<HTMLElement>(".detail-technical-panel")!;
+  const toggle = detail.dialog.querySelector<HTMLButtonElement>(".detail-technical-toggle")!;
+  const shell = detail.dialog.querySelector(".detail-shell")!;
+  assert.equal(panel.hidden, true);
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  toggle.click();
+  assert.equal(panel.hidden, false);
+  assert.equal(shell.classList.contains("is-technical-open"), true);
+  assert.equal(detail.dialog.classList.contains("has-technical"), true);
+  assert.match(panel.textContent ?? "", /来源与执行边界/u);
+  toggle.click();
+  assert.equal(panel.hidden, true);
+  detail.closeButton.click();
+});
+
+test("FigureYa collapsed catalog prose is split before rendering", () => {
+  const document = createTestWindow().document as unknown as Document;
+  const opener = document.createElement("button");
+  document.body.append(opener);
+  const selected = candidate("org.figureya.module", "FigureYa101PCA", "ready", "data:image/png;base64,iVBORw0KGgo=");
+  selected.description = "中文需求。 English requirement. From http://example.com/paper 3";
+  selected.application = "s 场景一：批次效应。 Scenario 1: Batch effect. 4";
+  selected.dataProfile = "矩阵，行表示特征 # batch: 批次信息 # batchvar: 批次变量 # fig.dir: 输出目录";
+  const detail = openCandidateDetail({
+    document, candidate: selected, opener, serverToolsAvailable: true, updateModelContextAvailable: false,
+    onRequestExactPreview() {}, onRequestAgentReview() {},
+  });
+  const text = detail.dialog.textContent ?? "";
+  assert.match(detail.dialog.querySelector(".detail-description")?.innerHTML ?? "", /English requirement/u);
+  assert.match(text, /场景一/u);
+  assert.match(text, /batch/u);
+  assert.doesNotMatch(detail.dialog.querySelector(".detail-description")?.textContent ?? "", /paper 3$/u);
+  detail.closeButton.click();
+});
+
+test("local save purpose loads the exact image and puts save in the top toolbar", async () => {
+  const document = createTestWindow().document as unknown as Document;
+  const opener = document.createElement("button");
+  document.body.append(opener);
+  let exactCalls = 0;
+  const detail = openCandidateDetail({
+    document,
+    candidate: candidate("org.figureya.module", "save-flow", "ready", "data:image/png;base64,iVBORw0KGgo="),
+    opener,
+    serverToolsAvailable: true,
+    updateModelContextAvailable: false,
+    purpose: "save",
+    onRequestExactPreview() { exactCalls += 1; },
+    onRequestAgentReview() {},
+  });
+  await Promise.resolve();
+  assert.equal(exactCalls, 1);
+  assert.equal(detail.dialog.classList.contains("detail-save-flow"), true);
+  assert.match(detail.confirmButton.textContent ?? "", /保存到项目/u);
+  assert.equal(detail.confirmButton.closest(".detail-toolbar-actions") !== null, true);
+  assert.equal(detail.dialog.querySelector<HTMLElement>(".detail-technical-panel")?.hidden, true);
+  assert.ok(detail.dialog.querySelector(".detail-technical-toggle"));
+  assert.equal(detail.confirmButton.getAttribute("aria-label"), "保存到项目");
+  assert.match(detail.status.textContent ?? "", /正在加载精确图片/u);
+  assert.match(detail.preview.textContent ?? "", /正在加载精确图片/u);
+  detail.closeButton.click();
+});
+
+
+test("Local titles use readable English subtitles and technical states are folded even in save flow", () => {
+  const dom = createTestWindow(); const document = dom.window.document;
+  const item = candidate("org.scientificfigurelibrary.local", "bilingual-local", "ready");
+  item.title = "转录因子基序富集注释热图"; item.titleEn = "Annotated TF Motif Enrichment Heatmap";
+  item.warnings = ["synthetic_values", "upstream_not_run"];
+  const cards = document.createElement("div"), empty = document.createElement("div");
+  const result = { candidates: [item], resultSetId: "bilingual-result" } as SearchResult;
+  renderCandidateCards({ document, cards, empty, result, onDetail() {} });
+  assert.equal(cards.querySelector(".module-title-en")?.textContent, item.titleEn);
+  assert.doesNotMatch(cards.textContent ?? "", /synthetic_values|upstream_not_run/);
+  const opener = document.createElement("button"); document.body.append(opener);
+  const detail = openCandidateDetail({ document, candidate: item, opener, purpose: "save",
+    serverToolsAvailable: true, updateModelContextAvailable: true, onRequestExactPreview() {}, onRequestAgentReview() {} });
+  assert.equal(detail.dialog.querySelector(".detail-title-en")?.textContent, item.titleEn);
+  const panel = detail.dialog.querySelector<HTMLElement>(".detail-technical-panel")!;
+  assert.equal(panel.hidden, true);
+  (detail.dialog.querySelector(".detail-technical-toggle") as HTMLButtonElement).click();
+  assert.equal(panel.hidden, false); assert.match(panel.textContent ?? "", /synthetic_values/);
+  detail.closeButton.click();
+  item.titleEn = item.title;
+  renderCandidateCards({ document, cards, empty, result, onDetail() {} });
+  assert.equal(cards.querySelector(".module-title-en"), null);
+});
